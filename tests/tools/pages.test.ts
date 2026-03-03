@@ -95,10 +95,11 @@ describe('pages', () => {
     });
 
     for (const categoryExtensions of [true, false]) {
-      it(`list pages for extension service workers ${categoryExtensions ? 'with' : 'without'} --category-extensions`, async() => {
+      it(`list pages for extension service workers ${categoryExtensions ? 'with' : 'without'} --category-extensions`, async () => {
         await withMcpContext(
           async (response, context) => {
-            const extensionId = await context.installExtension(EXTENSION_SW_PATH);
+            const extensionId =
+              await context.installExtension(EXTENSION_SW_PATH);
             assert.ok(extensionId);
 
             const swTarget = await context.browser.waitForTarget(
