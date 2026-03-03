@@ -95,7 +95,7 @@ describe('pages', () => {
     });
 
     for (const categoryExtensions of [true, false]) {
-      it(`list pages for extension service workers ${categoryExtensions ? 'with' : 'without'} --category-extensions`, async () => {
+      it(`list pages for extension service workers ${categoryExtensions ? 'with' : 'without'} --category-extensions`, async t => {
         await withMcpContext(
           async (response, context) => {
             const extensionId =
@@ -108,8 +108,6 @@ describe('pages', () => {
                 target.url().includes('chrome-extension://'),
             );
             const swUrl = swTarget.url();
-
-            response.resetResponseLineForTesting();
 
             const listPageDef = listPages({
               categoryExtensions,
@@ -128,7 +126,6 @@ describe('pages', () => {
             assert.ok(textContent);
 
             if (categoryExtensions) {
-              assert.ok(textContent.text.includes(swUrl));
               const structured = result.structuredContent as {
                 extensionServiceWorkers: Array<{url: string}>;
               };
@@ -136,9 +133,13 @@ describe('pages', () => {
                 structured.extensionServiceWorkers.map(sw => sw.url),
                 [swUrl],
               );
-            } else {
-              assert.ok(!textContent.text.includes(swUrl));
             }
+
+            const text = textContent.text.replaceAll(
+              extensionId,
+              '<extension-id>',
+            );
+            t.assert.snapshot?.(text);
           },
           {},
           {
