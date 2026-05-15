@@ -133,6 +133,15 @@ export const ExperimentName = {
   }
 
   copyDevToolsDescriptionFiles();
+  copyServiceTemplates();
+}
+
+function copyServiceTemplates() {
+  const sourceDir = path.join(process.cwd(), 'src', 'bin', 'service');
+  const destDir = path.join(BUILD_DIR, 'src', 'bin', 'service');
+  if (fs.existsSync(sourceDir)) {
+    fs.cpSync(sourceDir, destDir, {recursive: true});
+  }
 }
 
 function copyDevToolsDescriptionFiles() {
