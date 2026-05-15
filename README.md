@@ -1,6 +1,67 @@
-# Chrome DevTools for Agents
+# Chrome DevTools MCP — Multi-Agent Fork
 
-[![npm chrome-devtools-mcp package](https://img.shields.io/npm/v/chrome-devtools-mcp.svg)](https://npmjs.org/package/chrome-devtools-mcp)
+[![npm @vibebrowser/chrome-devtools-mcp](https://img.shields.io/npm/v/@vibebrowser/chrome-devtools-mcp.svg)](https://npmjs.org/package/@vibebrowser/chrome-devtools-mcp)
+
+> **Fork of [ChromeDevTools/chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp)** with HTTP transport for multi-agent sharing.
+>
+> The upstream only supports stdio — one agent per process, one CDP connection per browser. This fork adds a persistent HTTP service that multiple agents can connect to simultaneously without resetting each other's sessions.
+
+---
+
+## Quick Start
+
+Install as a background service (macOS/Linux):
+
+```bash
+npx @vibebrowser/chrome-devtools-mcp install --port 9333
+```
+
+That's it. The service auto-connects to your running Chrome and starts accepting MCP requests at `http://localhost:9333/mcp`.
+
+### Add to your agent config
+
+Works with OpenCode, Copilot, Claude, Cursor, or any MCP client:
+
+```json
+{
+  "mcpServers": {
+    "chrome-devtools": {
+      "url": "http://localhost:9333/mcp"
+    }
+  }
+}
+```
+
+### Expose to cloud agents via Tailscale
+
+```bash
+npx @vibebrowser/chrome-devtools-mcp install --port 9333 --tailscale
+```
+
+Your browser becomes accessible at `https://your-mac.tailnet.ts.net/mcp` — private, encrypted, no public exposure.
+
+### Manage the service
+
+```bash
+npx @vibebrowser/chrome-devtools-mcp status
+npx @vibebrowser/chrome-devtools-mcp uninstall
+```
+
+---
+
+## What's Different From Upstream
+
+| | Upstream (`chrome-devtools-mcp`) | This fork (`@vibebrowser/chrome-devtools-mcp`) |
+|---|---|---|
+| Transport | stdio only | stdio + HTTP (StreamableHTTP) |
+| Multi-agent | ❌ One agent per process | ✅ Multiple agents, independent sessions |
+| Deployment | Per-invocation via `npx` | Background service (launchd/systemd) |
+| Remote access | None | Tailscale serve integration |
+| Package | `chrome-devtools-mcp` | `@vibebrowser/chrome-devtools-mcp` |
+
+---
+
+## Original README
 
 Chrome DevTools for Agents (`chrome-devtools-mcp`) lets your coding agent (such as Gemini, Claude, Cursor or Copilot)
 control and inspect a live Chrome browser. It acts as a Model-Context-Protocol
