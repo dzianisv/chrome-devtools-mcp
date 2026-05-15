@@ -273,6 +273,51 @@ function uninstallTailscale(port: number) {
   }
 }
 
+async function healthCheck(port: number, retries = 10, delayMs = 1000): Promise<boolean> {
+  const url = `http://localhost:${port}/mcp`;
+  const body = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: {name: 'health-check', version: '1.0'},
+    },
+  });
+
+  process.stdout.write('⏳ Checking service health');
+
+  for (let i = 0; i < retries; i++) {
+    await new Promise(r => setTimeout(r, delayMs));
+    process.stdout.write('.');
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
+        body,
+      });
+
+      if (res.ok) {
+        const text = await res.text();
+        if (text.includes('"protocolVersion"')) {
+          console.log(' ✅ healthy');
+          return true;
+        }
+      }
+    } catch {
+      // Service not ready yet
+    }
+  }
+
+  console.log(' ❌ failed');
+  return false;
+}
+
 // Main
 const {port, action, tailscale} = parseArgs();
 const platform = process.platform;
@@ -295,8 +340,23 @@ if (platform === 'darwin') {
   process.exit(1);
 }
 
-if (action === 'install' && tailscale) {
-  installTailscale(port);
-} else if (action === 'install') {
-  printMcpConfig(`http://localhost:${port}/mcp`);
+if (action === 'install') {
+  const healthy = await healthCheck(port);
+  if (!healthy) {
+    console.error(`\n⚠️  Service installed but health check failed.`);
+    console.error(`   Check logs for errors.`);
+    if (platform === 'darwin') {
+      const logDir = path.join(process.env['HOME'] || '/tmp', 'Library', 'Logs', 'chrome-devtools-mcp');
+      console.error(`   Logs: cat ${logDir}/chrome-devtools-mcp.stderr.log`);
+    } else {
+      console.error(`   Logs: journalctl --user -u chrome-devtools-mcp`);
+    }
+    process.exit(1);
+  }
+
+  if (tailscale) {
+    installTailscale(port);
+  } else {
+    printMcpConfig(`http://localhost:${port}/mcp`);
+  }
 }
