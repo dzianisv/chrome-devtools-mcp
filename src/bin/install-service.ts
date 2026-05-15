@@ -26,18 +26,21 @@ function getBinPath(): string {
 function parseArgs() {
   const args = process.argv.slice(2);
   let port = DEFAULT_PORT;
+  let tailscale = false;
   let action: 'install' | 'uninstall' | 'status' = 'install';
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--port' || args[i] === '-p') {
       port = parseInt(args[++i]!, 10);
+    } else if (args[i] === '--tailscale') {
+      tailscale = true;
     } else if (args[i] === 'uninstall') {
       action = 'uninstall';
     } else if (args[i] === 'status') {
       action = 'status';
     }
   }
-  return {port, action};
+  return {port, action, tailscale};
 }
 
 function installMacOS(port: number) {
@@ -197,20 +200,89 @@ function statusLinux() {
   }
 }
 
+function installTailscale(port: number) {
+  // Check tailscale is available
+  try {
+    execSync('tailscale version', {stdio: 'pipe'});
+  } catch {
+    console.error('❌ tailscale CLI not found. Install from https://tailscale.com/download');
+    process.exit(1);
+  }
+
+  // Check tailscale is connected
+  try {
+    const status = execSync('tailscale status --json', {encoding: 'utf-8', stdio: 'pipe'});
+    const parsed = JSON.parse(status);
+    if (parsed.BackendState !== 'Running') {
+      console.error('❌ Tailscale is not connected. Run: tailscale up');
+      process.exit(1);
+    }
+  } catch {
+    console.error('❌ Could not get tailscale status. Is it running?');
+    process.exit(1);
+  }
+
+  // Expose via tailscale serve
+  try {
+    execSync(`tailscale serve --bg --https=443 http://localhost:${port}`, {
+      stdio: 'inherit',
+    });
+  } catch {
+    // Retry without --https (older tailscale versions)
+    try {
+      execSync(`tailscale serve --bg ${port}`, {stdio: 'inherit'});
+    } catch (e) {
+      console.error('❌ Failed to configure tailscale serve:', (e as Error).message);
+      process.exit(1);
+    }
+  }
+
+  // Get the tailscale hostname
+  try {
+    const dnsName = execSync('tailscale status --json', {encoding: 'utf-8', stdio: 'pipe'});
+    const parsed = JSON.parse(dnsName);
+    const self = parsed.Self;
+    const hostname = self?.DNSName?.replace(/\.$/, '') || '<your-machine>.tailnet.ts.net';
+    console.log(`\n✅ Tailscale serve configured`);
+    console.log(`   Remote URL: https://${hostname}/mcp`);
+    console.log(`   Accessible from any device on your tailnet`);
+  } catch {
+    console.log(`\n✅ Tailscale serve configured`);
+    console.log(`   Remote URL: https://<your-machine>.tailnet.ts.net/mcp`);
+  }
+}
+
+function uninstallTailscale(port: number) {
+  try {
+    execSync(`tailscale serve --remove / 2>/dev/null`, {stdio: 'pipe'});
+    console.log('✅ Removed tailscale serve');
+  } catch {
+    // ignore — might not have been configured
+  }
+}
+
 // Main
-const {port, action} = parseArgs();
+const {port, action, tailscale} = parseArgs();
 const platform = process.platform;
 
 if (platform === 'darwin') {
   if (action === 'install') installMacOS(port);
-  else if (action === 'uninstall') uninstallMacOS();
-  else statusMacOS();
+  else if (action === 'uninstall') {
+    uninstallTailscale(port);
+    uninstallMacOS();
+  } else statusMacOS();
 } else if (platform === 'linux') {
   if (action === 'install') installLinux(port);
-  else if (action === 'uninstall') uninstallLinux();
-  else statusLinux();
+  else if (action === 'uninstall') {
+    uninstallTailscale(port);
+    uninstallLinux();
+  } else statusLinux();
 } else {
   console.error(`❌ Unsupported platform: ${platform}`);
   console.error('   Supported: macOS (launchd), Linux (systemd)');
   process.exit(1);
+}
+
+if (action === 'install' && tailscale) {
+  installTailscale(port);
 }
