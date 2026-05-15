@@ -23,6 +23,16 @@ function getBinPath(): string {
   return path.resolve(__dirname, 'chrome-devtools-mcp.js');
 }
 
+function printMcpConfig(url: string) {
+  console.log(`\nAdd to your agent config (opencode, copilot, claude, etc.):\n`);
+  console.log(JSON.stringify({
+    mcpServers: {
+      'chrome-devtools': {url},
+    },
+  }, null, 2));
+  console.log('');
+}
+
 function parseArgs() {
   const args = process.argv.slice(2);
   let port = DEFAULT_PORT;
@@ -246,9 +256,11 @@ function installTailscale(port: number) {
     console.log(`\n✅ Tailscale serve configured`);
     console.log(`   Remote URL: https://${hostname}/mcp`);
     console.log(`   Accessible from any device on your tailnet`);
+    printMcpConfig(`https://${hostname}/mcp`);
   } catch {
     console.log(`\n✅ Tailscale serve configured`);
     console.log(`   Remote URL: https://<your-machine>.tailnet.ts.net/mcp`);
+    printMcpConfig('https://<your-machine>.tailnet.ts.net/mcp');
   }
 }
 
@@ -285,4 +297,6 @@ if (platform === 'darwin') {
 
 if (action === 'install' && tailscale) {
   installTailscale(port);
+} else if (action === 'install') {
+  printMcpConfig(`http://localhost:${port}/mcp`);
 }
