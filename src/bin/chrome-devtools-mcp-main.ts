@@ -17,8 +17,8 @@ import {computeFlagUsage} from '../telemetry/flagUtils.js';
 import {
   StdioServerTransport,
   StreamableHTTPServerTransport,
+  isInitializeRequest,
 } from '../third_party/index.js';
-import {isInitializeRequest} from '@modelcontextprotocol/sdk/types.js';
 import {checkForUpdates} from '../utils/check-for-updates.js';
 import {VERSION} from '../version.js';
 

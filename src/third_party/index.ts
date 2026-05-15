@@ -24,6 +24,7 @@ export {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
 export {type ShapeOutput} from '@modelcontextprotocol/sdk/server/zod-compat.js';
 export {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 export {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+export {isInitializeRequest} from '@modelcontextprotocol/sdk/types.js';
 export {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 export {Client} from '@modelcontextprotocol/sdk/client/index.js';
 export {
