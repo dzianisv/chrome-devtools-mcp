@@ -23,14 +23,82 @@ function getBinPath(): string {
   return path.resolve(__dirname, 'chrome-devtools-mcp.js');
 }
 
-function printMcpConfig(url: string) {
-  console.log(`\nAdd to your agent config (opencode, copilot, claude, etc.):\n`);
-  console.log(JSON.stringify({
-    mcpServers: {
-      'chrome-devtools': {url},
-    },
-  }, null, 2));
-  console.log('');
+function commandExists(cmd: string): boolean {
+  try {
+    execSync(`which ${cmd}`, {stdio: 'pipe'});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function configureAgents(url: string) {
+  console.log(`\n📋 Configuring agents...\n`);
+  let configured = 0;
+
+  // Claude Code
+  if (commandExists('claude')) {
+    try {
+      execSync(`claude mcp remove chrome-devtools -s user 2>/dev/null`, {stdio: 'pipe'});
+    } catch { /* ignore */ }
+    try {
+      execSync(`claude mcp add --transport http -s user chrome-devtools ${url}`, {stdio: 'pipe'});
+      console.log(`  ✅ Claude Code — configured`);
+      configured++;
+    } catch (e) {
+      console.log(`  ⚠️  Claude Code — failed: ${(e as Error).message}`);
+    }
+  } else {
+    console.log(`  ⏭️  Claude Code — not installed`);
+  }
+
+  // Copilot CLI
+  const copilotConfig = path.join(process.env['HOME'] || '', '.copilot', 'mcp-config.json');
+  try {
+    let config: Record<string, unknown> = {};
+    if (fs.existsSync(copilotConfig)) {
+      config = JSON.parse(fs.readFileSync(copilotConfig, 'utf-8'));
+    }
+    const servers = (config['mcpServers'] || {}) as Record<string, unknown>;
+    servers['chrome-devtools'] = {type: 'http', url};
+    config['mcpServers'] = servers;
+    fs.mkdirSync(path.dirname(copilotConfig), {recursive: true});
+    fs.writeFileSync(copilotConfig, JSON.stringify(config, null, 2) + '\n');
+    console.log(`  ✅ Copilot CLI — configured (${copilotConfig})`);
+    configured++;
+  } catch (e) {
+    console.log(`  ⚠️  Copilot CLI — failed: ${(e as Error).message}`);
+  }
+
+  // OpenCode
+  const opencodeBin = commandExists('opencode');
+  const opencodeConfig = path.join(process.env['HOME'] || '', '.config', 'opencode', 'opencode.json');
+  if (opencodeBin || fs.existsSync(opencodeConfig)) {
+    try {
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(opencodeConfig)) {
+        config = JSON.parse(fs.readFileSync(opencodeConfig, 'utf-8'));
+      }
+      const mcp = (config['mcp'] || {}) as Record<string, unknown>;
+      mcp['chrome-devtools'] = {type: 'remote', url, enabled: true};
+      config['mcp'] = mcp;
+      fs.mkdirSync(path.dirname(opencodeConfig), {recursive: true});
+      fs.writeFileSync(opencodeConfig, JSON.stringify(config, null, 2) + '\n');
+      console.log(`  ✅ OpenCode — configured (${opencodeConfig})`);
+      configured++;
+    } catch (e) {
+      console.log(`  ⚠️  OpenCode — failed: ${(e as Error).message}`);
+    }
+  } else {
+    console.log(`  ⏭️  OpenCode — not installed`);
+  }
+
+  if (configured === 0) {
+    console.log(`\n  Manual config — add to your MCP client:`);
+    console.log(`  ${JSON.stringify({url})}\n`);
+  } else {
+    console.log(`\n  🎉 ${configured} agent(s) configured with ${url}\n`);
+  }
 }
 
 function parseArgs() {
@@ -256,11 +324,11 @@ function installTailscale(port: number) {
     console.log(`\n✅ Tailscale serve configured`);
     console.log(`   Remote URL: https://${hostname}/mcp`);
     console.log(`   Accessible from any device on your tailnet`);
-    printMcpConfig(`https://${hostname}/mcp`);
+    configureAgents(`https://${hostname}/mcp`);
   } catch {
     console.log(`\n✅ Tailscale serve configured`);
     console.log(`   Remote URL: https://<your-machine>.tailnet.ts.net/mcp`);
-    printMcpConfig('https://<your-machine>.tailnet.ts.net/mcp');
+    configureAgents('https://<your-machine>.tailnet.ts.net/mcp');
   }
 }
 
@@ -357,6 +425,6 @@ if (action === 'install') {
   if (tailscale) {
     installTailscale(port);
   } else {
-    printMcpConfig(`http://localhost:${port}/mcp`);
+    configureAgents(`http://localhost:${port}/mcp`);
   }
 }
