@@ -10,13 +10,23 @@
 
 ## Quick Start
 
-Install as a background service (macOS/Linux):
+### Option A — via npx (no clone needed)
 
 ```bash
 npx @vibebrowser/chrome-devtools-mcp install --port 9333
 ```
 
-That's it. The service auto-connects to your running Chrome and starts accepting MCP requests at `http://localhost:9333/mcp`.
+### Option B — from source
+
+```bash
+git clone https://github.com/dzianisv/chrome-devtools-mcp.git
+cd chrome-devtools-mcp
+git checkout feat/streamable-http-transport
+npm install
+npm run install:service
+```
+
+Both options do the same thing: build, install as a background service (launchd on macOS / systemd on Linux), verify Chrome is connected, and auto-configure all detected agents (Claude Code, Copilot CLI, OpenCode).
 
 ### Add to your agent config
 
@@ -36,6 +46,8 @@ Works with OpenCode, Copilot, Claude, Cursor, or any MCP client:
 
 ```bash
 npx @vibebrowser/chrome-devtools-mcp install --port 9333 --tailscale
+# or from source:
+npm run install:service -- --tailscale
 ```
 
 Your browser becomes accessible at `https://your-mac.tailnet.ts.net/mcp` — private, encrypted, no public exposure.
