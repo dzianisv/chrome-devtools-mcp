@@ -23,7 +23,6 @@ import {
   RootsListChangedNotificationSchema,
 } from './third_party/index.js';
 import {ToolHandler} from './ToolHandler.js';
-import type {DefinedPageTool, ToolDefinition} from './tools/ToolDefinition.js';
 import {createTools} from './tools/tools.js';
 import {VERSION} from './version.js';
 
@@ -45,49 +44,6 @@ export async function createMcpServer(
       clearcutIncludePidHeader: serverArgs.clearcutIncludePidHeader,
     });
   }
-
-  const server = new McpServer(
-    {
-      name: 'chrome_devtools',
-      title: 'Chrome DevTools MCP server',
-      version: VERSION,
-    },
-    {capabilities: {logging: {}}},
-  );
-  server.server.setRequestHandler(SetLevelRequestSchema, () => {
-    return {};
-  });
-
-  const updateRoots = async () => {
-    if (!server.server.getClientCapabilities()?.roots) {
-      return;
-    }
-    try {
-      const roots = await server.server.request(
-        {method: 'roots/list'},
-        ListRootsResultSchema,
-      );
-      context?.setRoots(roots.roots);
-    } catch (e) {
-      logger('Failed to list roots', e);
-    }
-  };
-
-  server.server.oninitialized = () => {
-    const clientName = server.server.getClientVersion()?.name;
-    if (clientName) {
-      ClearcutLogger.get()?.setClientName(clientName);
-    }
-    if (server.server.getClientCapabilities()?.roots) {
-      void updateRoots();
-      server.server.setNotificationHandler(
-        RootsListChangedNotificationSchema,
-        () => {
-          void updateRoots();
-        },
-      );
-    }
-  };
 
   let context: McpContext;
   async function getContext(): Promise<McpContext> {
@@ -134,46 +90,105 @@ export async function createMcpServer(
         experimentalIncludeAllPages: serverArgs.experimentalIncludeAllPages,
         performanceCrux: serverArgs.performanceCrux,
       });
-      await updateRoots();
     }
     return context;
   }
 
   const toolMutex = new Mutex();
-
-  function registerTool(tool: ToolDefinition | DefinedPageTool): void {
-    const toolHandler = new ToolHandler(
-      tool,
-      serverArgs,
-      getContext,
-      toolMutex,
-    );
-
-    if (!toolHandler.shouldRegister) {
-      return;
-    }
-
-    server.registerTool(
-      tool.name,
-      {
-        description: tool.description,
-        inputSchema: toolHandler.registeredInputSchema,
-        annotations: tool.annotations,
-      },
-      async (params): Promise<CallToolResult> => {
-        return await toolHandler.handle(params);
-      },
-    );
-  }
-
   const tools = createTools(serverArgs);
-  for (const tool of tools) {
-    registerTool(tool);
-  }
-
   await loadIssueDescriptions();
 
-  return {server};
+  /**
+   * Creates a new McpServer instance with all tools registered.
+   * Each MCP session requires its own server instance because the
+   * underlying Protocol class only supports one transport at a time.
+   * Heavy state (Chrome connection, tool definitions, mutex) is shared.
+   */
+  function createSession(): McpServer {
+    const server = new McpServer(
+      {
+        name: 'chrome_devtools',
+        title: 'Chrome DevTools MCP server',
+        version: VERSION,
+      },
+      {capabilities: {logging: {}}},
+    );
+    server.server.setRequestHandler(SetLevelRequestSchema, () => {
+      return {};
+    });
+
+    const updateRoots = async () => {
+      if (!server.server.getClientCapabilities()?.roots) {
+        return;
+      }
+      try {
+        const roots = await server.server.request(
+          {method: 'roots/list'},
+          ListRootsResultSchema,
+        );
+        context?.setRoots(roots.roots);
+      } catch (e) {
+        logger('Failed to list roots', e);
+      }
+    };
+
+    server.server.oninitialized = () => {
+      const clientName = server.server.getClientVersion()?.name;
+      if (clientName) {
+        ClearcutLogger.get()?.setClientName(clientName);
+      }
+      if (server.server.getClientCapabilities()?.roots) {
+        void updateRoots();
+        server.server.setNotificationHandler(
+          RootsListChangedNotificationSchema,
+          () => {
+            void updateRoots();
+          },
+        );
+      }
+    };
+
+    // Wrap getContext to load roots after the shared context is first created.
+    let rootsLoaded = false;
+    const sessionGetContext = async (): Promise<McpContext> => {
+      const ctx = await getContext();
+      if (!rootsLoaded) {
+        rootsLoaded = true;
+        await updateRoots();
+      }
+      return ctx;
+    };
+
+    for (const tool of tools) {
+      const toolHandler = new ToolHandler(
+        tool,
+        serverArgs,
+        sessionGetContext,
+        toolMutex,
+      );
+
+      if (!toolHandler.shouldRegister) {
+        continue;
+      }
+
+      server.registerTool(
+        tool.name,
+        {
+          description: tool.description,
+          inputSchema: toolHandler.registeredInputSchema,
+          annotations: tool.annotations,
+        },
+        async (params): Promise<CallToolResult> => {
+          return await toolHandler.handle(params);
+        },
+      );
+    }
+
+    return server;
+  }
+
+  const server = createSession();
+  return {server, createSession};
 }
 
 export const logDisclaimers = (args: ReturnType<typeof parseArguments>) => {
