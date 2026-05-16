@@ -341,20 +341,10 @@ function uninstallTailscale(port: number) {
   }
 }
 
-async function healthCheck(port: number, retries = 10, delayMs = 1000): Promise<boolean> {
-  const url = `http://localhost:${port}/mcp`;
-  const body = JSON.stringify({
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'initialize',
-    params: {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: {name: 'health-check', version: '1.0'},
-    },
-  });
+async function healthCheck(port: number, retries = 15, delayMs = 2000): Promise<boolean> {
+  const url = `http://localhost:${port}/health`;
 
-  process.stdout.write('⏳ Checking service health');
+  process.stdout.write('⏳ Checking service health (verifying Chrome CDP connection)');
 
   for (let i = 0; i < retries; i++) {
     await new Promise(r => setTimeout(r, delayMs));
@@ -362,19 +352,19 @@ async function healthCheck(port: number, retries = 10, delayMs = 1000): Promise<
 
     try {
       const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json, text/event-stream',
-        },
-        body,
+        signal: AbortSignal.timeout(10000),
       });
 
       if (res.ok) {
-        const text = await res.text();
-        if (text.includes('"protocolVersion"')) {
-          console.log(' ✅ healthy');
+        const data = await res.json() as {status: string; chrome_connected?: boolean};
+        if (data.status === 'ok' && data.chrome_connected) {
+          console.log(' ✅ healthy (Chrome connected)');
           return true;
+        }
+        if (data.status === 'degraded') {
+          console.log(' ⚠️  MCP running but Chrome not connected');
+          console.log('   Make sure Google Chrome is running and check the approval dialog.');
+          return false;
         }
       }
     } catch {
@@ -383,6 +373,8 @@ async function healthCheck(port: number, retries = 10, delayMs = 1000): Promise<
   }
 
   console.log(' ❌ failed');
+  console.log('   Could not verify Chrome DevTools connection.');
+  console.log('   Ensure Chrome is running. The MCP server needs the DevToolsActivePort file.');
   return false;
 }
 

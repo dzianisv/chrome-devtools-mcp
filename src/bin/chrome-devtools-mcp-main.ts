@@ -80,8 +80,10 @@ if (args.port) {
         };
         await server.connect(transport);
         await transport.handleRequest(req, res, jsonBody);
-        // Extract session ID from response headers
-        const respSessionId = res.getHeader('mcp-session-id') as string;
+        // Store session by transport's assigned ID
+        const respSessionId =
+          (transport as unknown as {sessionId?: string}).sessionId ??
+          (res.getHeader('mcp-session-id') as string | undefined);
         if (respSessionId) {
           sessions.set(respSessionId, transport);
         }
@@ -91,6 +93,46 @@ if (args.port) {
       } else {
         res.writeHead(400, {'Content-Type': 'application/json'});
         res.end(JSON.stringify({error: 'Missing mcp-session-id header'}));
+      }
+    } else if (url.pathname === '/health') {
+      // Health check: verify Chrome is still reachable
+      // createMcpServer connects to Chrome at startup — if we're here, it succeeded.
+      // Check if Chrome's DevToolsActivePort still exists (Chrome hasn't been closed).
+      try {
+        const fs = await import('node:fs');
+        const path = await import('node:path');
+        const homeDir = process.env['HOME'] || '/tmp';
+        const platform = process.platform;
+        let userDataDir: string;
+        if (platform === 'darwin') {
+          userDataDir = path.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome');
+        } else {
+          userDataDir = path.join(homeDir, '.config', 'google-chrome');
+        }
+        const portFile = path.join(userDataDir, 'DevToolsActivePort');
+        const chromeRunning = fs.existsSync(portFile);
+
+        const status = chromeRunning ? 'ok' : 'error';
+        res.writeHead(chromeRunning ? 200 : 503, {
+          'Content-Type': 'application/json',
+        });
+        res.end(
+          JSON.stringify({
+            status,
+            chrome_connected: chromeRunning,
+            sessions: sessions.size,
+            ...(chromeRunning ? {} : {error: 'Chrome DevToolsActivePort not found — is Chrome running?'}),
+          }),
+        );
+      } catch (err) {
+        res.writeHead(503, {'Content-Type': 'application/json'});
+        res.end(
+          JSON.stringify({
+            status: 'error',
+            chrome_connected: false,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
       }
     } else {
       res.writeHead(404);
