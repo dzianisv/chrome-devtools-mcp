@@ -65,13 +65,13 @@ npx @vibebrowser/chrome-devtools-mcp uninstall
 
 ## What's Different From Upstream
 
-| | Upstream (`chrome-devtools-mcp`) | This fork (`@vibebrowser/chrome-devtools-mcp`) |
-|---|---|---|
-| Transport | stdio only | stdio + HTTP (StreamableHTTP) |
-| Multi-agent | ❌ One agent per process | ✅ Multiple agents, independent sessions |
-| Deployment | Per-invocation via `npx` | Background service (launchd/systemd) |
-| Remote access | None | Tailscale serve integration |
-| Package | `chrome-devtools-mcp` | `@vibebrowser/chrome-devtools-mcp` |
+|               | Upstream (`chrome-devtools-mcp`) | This fork (`@vibebrowser/chrome-devtools-mcp`) |
+| ------------- | -------------------------------- | ---------------------------------------------- |
+| Transport     | stdio only                       | stdio + HTTP (StreamableHTTP)                  |
+| Multi-agent   | ❌ One agent per process         | ✅ Multiple agents, independent sessions       |
+| Deployment    | Per-invocation via `npx`         | Background service (launchd/systemd)           |
+| Remote access | None                             | Tailscale serve integration                    |
+| Package       | `chrome-devtools-mcp`            | `@vibebrowser/chrome-devtools-mcp`             |
 
 ---
 
