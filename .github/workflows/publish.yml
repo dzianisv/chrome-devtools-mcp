@@ -26,10 +26,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build
+      - name: Bundle (build + rollup)
+        run: npm run bundle
+        env:
+          NODE_ENV: 'production'
 
       - name: Publish to npm
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Deploy to VM
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        if: env.SSH_PRIVATE_KEY != ''
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh -o StrictHostKeyChecking=no azureuser@100.108.64.76 \
+            "sudo npm install -g @vibebrowser/chrome-devtools-mcp@latest && systemctl --user restart chrome-devtools-mcp"
