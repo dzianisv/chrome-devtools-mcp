@@ -69,6 +69,18 @@ if (args.port) {
         isInitializeRequest(jsonBody) ||
         (Array.isArray(jsonBody) && jsonBody.some(isInitializeRequest))
       ) {
+        // Close all existing sessions before connecting a new one.
+        // McpServer only supports a single transport connection at a time,
+        // so we must disconnect the previous transport to avoid hangs.
+        for (const [id, existingTransport] of sessions) {
+          try {
+            await existingTransport.close();
+          } catch {
+            // Ignore close errors on stale transports
+          }
+          sessions.delete(id);
+        }
+
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
         });
