@@ -311,6 +311,57 @@ describe('HTTP transport session management', () => {
     await closeClient(clientB, transportB);
   });
 
+  it('multiple sessions can call tools concurrently without interference', async () => {
+    // The multi-agent core scenario: N independent sessions firing tool calls
+    // in parallel. They share one browser and one tool mutex, so calls are
+    // serialized server-side — every call must still complete successfully and
+    // the burst must not deadlock or leave the server unhealthy. Under a
+    // per-session mutex (a tempting "optimization") concurrent tools would
+    // race the shared browser state and this would flake.
+    const NUM_CLIENTS = 3;
+    const CALLS_PER_CLIENT = 4;
+    const conns = await Promise.all(
+      Array.from({length: NUM_CLIENTS}, async () => {
+        const c = createClient();
+        const t = createTransport(server.mcpUrl);
+        await c.connect(t);
+        return {c, t};
+      }),
+    );
+
+    const results = await Promise.all(
+      conns.flatMap(({c}, i) =>
+        Array.from({length: CALLS_PER_CLIENT}, async (_, k) => {
+          const r = await c.callTool({name: 'list_pages', arguments: {}});
+          return {clientIndex: i, callIndex: k, result: r};
+        }),
+      ),
+    );
+
+    assert.strictEqual(
+      results.length,
+      NUM_CLIENTS * CALLS_PER_CLIENT,
+      'every concurrent tool call should complete',
+    );
+    for (const {clientIndex, callIndex, result} of results) {
+      assert.ok(
+        Array.isArray(result.content) && result.content.length > 0,
+        `client ${clientIndex} call ${callIndex} should return content`,
+      );
+    }
+
+    const health = await getHealth(server.healthUrl);
+    assert.strictEqual(
+      health.status,
+      'ok',
+      'server must stay healthy under concurrent multi-session load',
+    );
+
+    for (const {c, t} of conns) {
+      await closeClient(c, t);
+    }
+  });
+
   it('health endpoint reflects sessions appearing and being reclaimed', async () => {
     const before = (await getHealth(server.healthUrl)).sessions;
 
@@ -450,7 +501,12 @@ describe('HTTP transport idle session reaping', () => {
     await server?.stop();
   });
 
-  it('reaps a session left idle past the TTL', async () => {
+  it('reaps a session whose client went away without DELETE', async () => {
+    // The real abandoned-client case: client crashed / lost network. The SDK
+    // never sends DELETE; the server only knows because the GET SSE stream
+    // socket eventually closes, dropping activeRequests to 0. Then the idle
+    // TTL has to reclaim what's left. Simulate it by aborting the transport
+    // (no DELETE) before waiting.
     const before = (await getHealth(server.healthUrl)).sessions;
 
     const client = createClient();
@@ -462,16 +518,100 @@ describe('HTTP transport idle session reaping', () => {
       'session should be registered after connect',
     );
 
-    // Stay idle well past the 2s TTL and at least one reaper sweep.
+    // Abrupt transport-level close — no MCP DELETE, just drop the socket.
+    await transport.close().catch(() => undefined);
+
+    // Stay past the 2s TTL and at least one reaper sweep.
     await new Promise(r => setTimeout(r, 7000));
 
-    const after = (await getHealth(server.healthUrl)).sessions;
     assert.strictEqual(
-      after,
+      (await getHealth(server.healthUrl)).sessions,
       before,
-      'an idle session must be reaped once it passes the TTL',
+      'an abandoned session must be reaped once it passes the TTL',
+    );
+  });
+
+  it('does not reap a connected client even when lastActivity is older than the TTL', async () => {
+    // A client that is connected and just idle is NOT a dead client — its GET
+    // SSE stream is still open, so activeRequests > 0 and the reaper must
+    // leave it alone. Otherwise legitimate idle clients would silently lose
+    // their notification channel as soon as they stop sending POSTs.
+    const before = (await getHealth(server.healthUrl)).sessions;
+
+    const client = createClient();
+    const transport = createTransport(server.mcpUrl);
+    await client.connect(transport);
+    assert.strictEqual(
+      (await getHealth(server.healthUrl)).sessions,
+      before + 1,
     );
 
-    await client.close().catch(() => undefined);
+    // Sit on the connection past the TTL with no POSTs. The GET stream alone
+    // keeps activeRequests at 1, so the reaper must skip this session.
+    await new Promise(r => setTimeout(r, 5000));
+
+    assert.strictEqual(
+      (await getHealth(server.healthUrl)).sessions,
+      before + 1,
+      'connected idle client must survive the reaper',
+    );
+    // Confirm the session is still functional after surviving the TTL.
+    assert.ok((await client.listTools()).tools.length > 0);
+
+    await closeClient(client, transport);
+  });
+});
+
+describe('HTTP transport capacity limit', () => {
+  let server: TestServer;
+
+  before(async () => {
+    server = await spawnServer({CHROME_DEVTOOLS_MCP_MAX_SESSIONS: '2'});
+  });
+
+  after(async () => {
+    await server?.stop();
+  });
+
+  it('evicts the least-recently-active session when MAX_SESSIONS is exceeded', async () => {
+    // With cap=2, the third initialize must force eviction of the oldest.
+    // Capacity is a HARD limit, so even an "active" session (open GET stream)
+    // is fair game once the cap is breached — that's what protects the server
+    // from a flood of connects pinning the map open.
+    const c1 = createClient();
+    const t1 = createTransport(server.mcpUrl);
+    await c1.connect(t1);
+
+    const c2 = createClient();
+    const t2 = createTransport(server.mcpUrl);
+    await c2.connect(t2);
+
+    // Connecting c3 must trigger removal of c1 (oldest lastActivity).
+    const c3 = createClient();
+    const t3 = createTransport(server.mcpUrl);
+    await c3.connect(t3);
+
+    const health = await getHealth(server.healthUrl);
+    assert.ok(
+      health.sessions <= 2,
+      `cap=2 must be enforced; got ${health.sessions} sessions`,
+    );
+
+    // c1 was evicted: its session id is unknown to the server now, so a
+    // request carrying it must reject. The exact error shape is up to the SDK
+    // — what matters is the call doesn't silently succeed.
+    await assert.rejects(
+      c1.listTools(),
+      'evicted session must reject subsequent requests',
+    );
+
+    // c2 and c3 must still work — eviction only touched the oldest.
+    assert.ok((await c2.listTools()).tools.length > 0);
+    assert.ok((await c3.listTools()).tools.length > 0);
+
+    await closeClient(c2, t2);
+    await closeClient(c3, t3);
+    // c1's transport is dead server-side; just drop the local socket.
+    await t1.close().catch(() => undefined);
   });
 });
