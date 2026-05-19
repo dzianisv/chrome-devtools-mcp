@@ -72,6 +72,31 @@ npx @vibebrowser/chrome-devtools-mcp uninstall
 | Deployment | Per-invocation via `npx` | Background service (launchd/systemd) |
 | Remote access | None | Tailscale serve integration |
 | Package | `chrome-devtools-mcp` | `@vibebrowser/chrome-devtools-mcp` |
+| Session cleanup | N/A | ✅ Automatic 5-min timeout for stale sessions |
+| Chrome detection | Basic | Auto-detects `--remote-debugging-port` or DevToolsActivePort |
+
+---
+
+## Advanced Configuration
+
+### `--browserUrl` for headless/remote Chrome
+
+If Chrome uses a custom user-data-dir or runs headless without a default profile, the installer auto-detects the debugging port and passes `--browserUrl`:
+
+```bash
+npx @vibebrowser/chrome-devtools-mcp install --port 3100 --browserUrl http://127.0.0.1:9222
+```
+
+Use `--browserUrl` when Chrome doesn't have a `DevToolsActivePort` file in its default profile directory.
+
+### Session Management
+
+The HTTP server automatically cleans up idle sessions after 5 minutes. This prevents orphaned connections from blocking new agents. The `/health` endpoint reports current session count:
+
+```bash
+curl http://localhost:9333/health
+# {"status":"ok","chrome_connected":true,"sessions":0}
+```
 
 ---
 

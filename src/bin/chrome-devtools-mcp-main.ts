@@ -45,6 +45,24 @@ const {server} = await createMcpServer(args, {
 
 if (args.port) {
   const sessions = new Map<string, StreamableHTTPServerTransport>();
+  const sessionLastActivity = new Map<string, number>();
+
+  // Clean up stale sessions every 60 seconds (5 min timeout)
+  const SESSION_TIMEOUT_MS = 5 * 60 * 1000;
+  setInterval(() => {
+    const now = Date.now();
+    for (const [id, lastActive] of sessionLastActivity.entries()) {
+      if (now - lastActive > SESSION_TIMEOUT_MS) {
+        const transport = sessions.get(id);
+        if (transport) {
+          try { transport.close(); } catch { /* ignore */ }
+        }
+        sessions.delete(id);
+        sessionLastActivity.delete(id);
+        logger(`Session ${id} timed out and was cleaned up`);
+      }
+    }
+  }, 60_000);
 
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://localhost:${args.port}`);
@@ -52,6 +70,7 @@ if (args.port) {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
       if (sessionId && sessions.has(sessionId)) {
+        sessionLastActivity.set(sessionId, Date.now());
         const transport = sessions.get(sessionId)!;
         await transport.handleRequest(req, res);
         return;
@@ -86,6 +105,7 @@ if (args.port) {
           (res.getHeader('mcp-session-id') as string | undefined);
         if (respSessionId) {
           sessions.set(respSessionId, transport);
+          sessionLastActivity.set(respSessionId, Date.now());
         }
       } else if (sessionId) {
         res.writeHead(404, {'Content-Type': 'application/json'});
