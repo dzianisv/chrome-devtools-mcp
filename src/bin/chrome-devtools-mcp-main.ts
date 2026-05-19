@@ -46,6 +46,10 @@ const {server} = await createMcpServer(args, {
 if (args.port) {
   const sessions = new Map<string, StreamableHTTPServerTransport>();
 
+  // Mutex to serialize initialize requests. McpServer only supports a single
+  // transport connection at a time, so concurrent initializes must be queued.
+  let initializeLock: Promise<void> = Promise.resolve();
+
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://localhost:${args.port}`);
     if (url.pathname === '/mcp') {
@@ -69,35 +73,56 @@ if (args.port) {
         isInitializeRequest(jsonBody) ||
         (Array.isArray(jsonBody) && jsonBody.some(isInitializeRequest))
       ) {
-        // Close all existing sessions before connecting a new one.
-        // McpServer only supports a single transport connection at a time,
-        // so we must disconnect the previous transport to avoid hangs.
-        for (const [id, existingTransport] of sessions) {
-          try {
-            await existingTransport.close();
-          } catch {
-            // Ignore close errors on stale transports
-          }
-          sessions.delete(id);
-        }
-
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
+        // Serialize initialize requests to prevent race conditions.
+        // Each initialize must fully complete (close old session, connect new)
+        // before the next one starts.
+        let releaseLock: () => void;
+        const previousLock = initializeLock;
+        initializeLock = new Promise<void>(resolve => {
+          releaseLock = resolve;
         });
-        transport.onclose = () => {
-          const id = [...sessions.entries()].find(
-            ([, t]) => t === transport,
-          )?.[0];
-          if (id) sessions.delete(id);
-        };
-        await server.connect(transport);
-        await transport.handleRequest(req, res, jsonBody);
-        // Store session by transport's assigned ID
-        const respSessionId =
-          (transport as unknown as {sessionId?: string}).sessionId ??
-          (res.getHeader('mcp-session-id') as string | undefined);
-        if (respSessionId) {
-          sessions.set(respSessionId, transport);
+
+        try {
+          await previousLock;
+
+          // Close all existing sessions before connecting a new one.
+          // McpServer only supports a single transport connection at a time,
+          // so we must disconnect the previous transport to avoid hangs.
+          for (const [id, existingTransport] of sessions) {
+            try {
+              await existingTransport.close();
+            } catch {
+              // Ignore close errors on stale transports
+            }
+            sessions.delete(id);
+          }
+
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+          });
+          transport.onclose = () => {
+            const id = [...sessions.entries()].find(
+              ([, t]) => t === transport,
+            )?.[0];
+            if (id) sessions.delete(id);
+          };
+          await server.connect(transport);
+          await transport.handleRequest(req, res, jsonBody);
+          // Store session by transport's assigned ID
+          const respSessionId =
+            (transport as unknown as {sessionId?: string}).sessionId ??
+            (res.getHeader('mcp-session-id') as string | undefined);
+          if (respSessionId) {
+            sessions.set(respSessionId, transport);
+          }
+        } catch (err) {
+          logger('Error handling initialize request:', err);
+          if (!res.headersSent) {
+            res.writeHead(500, {'Content-Type': 'application/json'});
+            res.end(JSON.stringify({error: 'Internal server error'}));
+          }
+        } finally {
+          releaseLock!();
         }
       } else if (sessionId) {
         res.writeHead(404, {'Content-Type': 'application/json'});
