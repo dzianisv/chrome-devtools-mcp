@@ -6,58 +6,91 @@
 
 import assert from 'node:assert';
 import {type ChildProcess, spawn} from 'node:child_process';
+import * as net from 'node:net';
 import {after, before, describe, it} from 'node:test';
 
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {executablePath} from 'puppeteer';
 
-const PORT = 19333;
-const MCP_URL = `http://127.0.0.1:${PORT}/mcp`;
-const HEALTH_URL = `http://127.0.0.1:${PORT}/health`;
-
-function createClient(): Client {
-  return new Client(
-    {name: 'http-transport-test', version: '1.0.0'},
-    {capabilities: {}},
-  );
+/** Find a free TCP port by binding to :0 and reading the assigned port. */
+async function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, () => {
+      const addr = srv.address();
+      srv.close(() => {
+        if (addr !== null && typeof addr === 'object') {
+          resolve(addr.port);
+        } else {
+          reject(new Error('Could not determine free port'));
+        }
+      });
+    });
+  });
 }
 
-function createTransport(): StreamableHTTPClientTransport {
-  return new StreamableHTTPClientTransport(new URL(MCP_URL));
-}
-
-async function waitForServer(timeoutMs = 15000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(HEALTH_URL);
-      if (res.ok) return;
-    } catch {
-      // Server not ready yet
-    }
-    await new Promise(r => setTimeout(r, 200));
-  }
-  throw new Error(`Server did not start within ${timeoutMs}ms`);
-}
-
-async function getHealth(): Promise<{
+interface HealthResponse {
   status: string;
   chrome_connected: boolean;
   sessions: number;
-}> {
-  const res = await fetch(HEALTH_URL);
-  return res.json() as Promise<{
-    status: string;
-    chrome_connected: boolean;
-    sessions: number;
-  }>;
+}
+
+function assertHealthResponse(value: unknown): asserts value is HealthResponse {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('status' in value) ||
+    !('sessions' in value) ||
+    !('chrome_connected' in value)
+  ) {
+    throw new Error(`Invalid health response: ${JSON.stringify(value)}`);
+  }
 }
 
 describe('HTTP transport session management', () => {
   let serverProcess: ChildProcess;
+  let port: number;
+  let mcpUrl: string;
+  let healthUrl: string;
+
+  function createClient(): Client {
+    return new Client(
+      {name: 'http-transport-test', version: '1.0.0'},
+      {capabilities: {}},
+    );
+  }
+
+  function createTransport(): StreamableHTTPClientTransport {
+    return new StreamableHTTPClientTransport(new URL(mcpUrl));
+  }
+
+  async function waitForServer(timeoutMs = 15000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(healthUrl);
+        if (res.ok) {return;}
+      } catch {
+        // Server not ready yet
+      }
+      await new Promise(r => setTimeout(r, 200));
+    }
+    throw new Error(`Server did not start within ${timeoutMs}ms`);
+  }
+
+  async function getHealth(): Promise<HealthResponse> {
+    const res = await fetch(healthUrl);
+    const data: unknown = await res.json();
+    assertHealthResponse(data);
+    return data;
+  }
 
   before(async () => {
+    port = await getFreePort();
+    mcpUrl = `http://127.0.0.1:${port}/mcp`;
+    healthUrl = `http://127.0.0.1:${port}/health`;
+
     serverProcess = spawn(
       'node',
       [
@@ -67,7 +100,7 @@ describe('HTTP transport session management', () => {
         '--executable-path',
         executablePath(),
         '--port',
-        String(PORT),
+        String(port),
       ],
       {
         env: {
@@ -79,10 +112,9 @@ describe('HTTP transport session management', () => {
       },
     );
 
-    // Collect stderr for debugging
     let stderr = '';
     serverProcess.stderr?.on('data', chunk => {
-      stderr += chunk.toString();
+      stderr += String(chunk);
     });
 
     serverProcess.on('error', err => {
@@ -123,7 +155,6 @@ describe('HTTP transport session management', () => {
   });
 
   it('second client can connect after first disconnects cleanly', async () => {
-    // First client
     const client1 = createClient();
     const transport1 = createTransport();
     await client1.connect(transport1);
@@ -131,7 +162,6 @@ describe('HTTP transport session management', () => {
     assert.ok(tools1.tools.length > 0);
     await client1.close();
 
-    // Second client
     const client2 = createClient();
     const transport2 = createTransport();
     await client2.connect(transport2);
@@ -140,22 +170,23 @@ describe('HTTP transport session management', () => {
     await client2.close();
   });
 
-  it('second client can connect after first disconnects uncleanly', async () => {
-    // First client - connect then simulate unclean disconnect by not calling close()
+  it('second client can connect after first drops the HTTP connection without MCP session teardown', async () => {
+    // Simulate an abrupt client loss: close the transport-level HTTP connection
+    // without going through client.close() (which would send an MCP DELETE).
+    // The server sees the SSE stream close but receives no formal termination.
     const client1 = createClient();
     const transport1 = createTransport();
     await client1.connect(transport1);
     const tools1 = await client1.listTools();
     assert.ok(tools1.tools.length > 0);
 
-    // Simulate unclean disconnect: just abandon the transport without close
-    // The transport's underlying fetch connection will be GC'd
-    transport1.close().catch(() => {});
+    // Drop the transport without sending MCP session DELETE
+    transport1.close().catch(() => undefined);
 
-    // Give the server a moment to detect or not detect the disconnect
+    // Allow server time to notice the stream closure
     await new Promise(r => setTimeout(r, 500));
 
-    // Second client must still be able to connect
+    // A new client must still be able to initialize and use the server
     const client2 = createClient();
     const transport2 = createTransport();
     await client2.connect(transport2);
@@ -178,10 +209,11 @@ describe('HTTP transport session management', () => {
     }
   });
 
-  it('concurrent initialize requests do not deadlock', async () => {
-    // Launch multiple clients simultaneously — with serialization,
-    // the last one should win but none should hang or crash the server.
-    // The test will timeout if they deadlock.
+  it('concurrent initialize requests do not deadlock or crash the server', async () => {
+    // Launch multiple clients simultaneously. With serialized initializes,
+    // each one closes the previous session so some may fail mid-flight —
+    // that is expected. The critical invariants are: no hang, no crash,
+    // and the server must accept a fresh connection afterwards.
     const NUM_CONCURRENT = 3;
     const results = await Promise.allSettled(
       Array.from({length: NUM_CONCURRENT}, async (_, i) => {
@@ -190,34 +222,41 @@ describe('HTTP transport session management', () => {
         await client.connect(transport);
         const tools = await client.listTools();
         assert.ok(tools.tools.length > 0, `Client ${i} should get tools`);
-        return {client, transport};
+        return client;
       }),
     );
 
-    // With serialized initializes, each one closes the previous session.
-    // Some clients may get disconnected mid-flight, but at least the last
-    // one that initialized should succeed. The critical thing is no crash.
+    // At least one concurrent initialize should succeed
     const succeeded = results.filter(r => r.status === 'fulfilled');
     assert.ok(
       succeeded.length >= 1,
       `At least one concurrent client should connect, got ${succeeded.length} successes out of ${NUM_CONCURRENT}`,
     );
 
-    // Clean up successful connections
+    // Clean up surviving connections
     for (const result of succeeded) {
       if (result.status === 'fulfilled') {
-        await result.value.client.close().catch(() => {});
+        await result.value.close().catch(() => undefined);
       }
     }
 
-    // Verify the server is still alive after concurrent stress
+    // Critical: verify the server still accepts NEW connections on /mcp
+    // (health alone is insufficient — it can be OK while /mcp hangs)
+    const freshClient = createClient();
+    const freshTransport = createTransport();
+    await freshClient.connect(freshTransport);
+    const freshTools = await freshClient.listTools();
+    assert.ok(
+      freshTools.tools.length > 0,
+      'Server must still accept new /mcp connections after concurrent stress',
+    );
+    await freshClient.close();
+
     const health = await getHealth();
     assert.strictEqual(health.status, 'ok', 'Server should still be healthy');
   });
 
   it('server health endpoint reflects active session', async () => {
-    // A new initialize always closes previous sessions, so after connect
-    // there should be exactly 1 session.
     const client = createClient();
     const transport = createTransport();
     await client.connect(transport);
@@ -230,31 +269,27 @@ describe('HTTP transport session management', () => {
   });
 
   it('client can call tools after reconnecting to a recovered server', async () => {
-    // Connect first client and use a tool
     const client1 = createClient();
     const transport1 = createTransport();
     await client1.connect(transport1);
-    const result1 = await client1.callTool({
-      name: 'list_pages',
-      arguments: {},
-    });
-    const content1 = result1.content as Array<unknown>;
-    assert.ok(content1.length > 0, 'First tool call should return content');
+    const result1 = await client1.callTool({name: 'list_pages', arguments: {}});
+    assert.ok(
+      Array.isArray(result1.content) && result1.content.length > 0,
+      'First tool call should return content',
+    );
 
-    // Don't close cleanly — simulate crash
-    transport1.close().catch(() => {});
+    // Drop without MCP teardown
+    transport1.close().catch(() => undefined);
     await new Promise(r => setTimeout(r, 500));
 
-    // Second client connects and uses the same tool
     const client2 = createClient();
     const transport2 = createTransport();
     await client2.connect(transport2);
-    const result2 = await client2.callTool({
-      name: 'list_pages',
-      arguments: {},
-    });
-    const content2 = result2.content as Array<unknown>;
-    assert.ok(content2.length > 0, 'Second tool call should return content');
+    const result2 = await client2.callTool({name: 'list_pages', arguments: {}});
+    assert.ok(
+      Array.isArray(result2.content) && result2.content.length > 0,
+      'Second tool call should return content after reconnect',
+    );
     await client2.close();
   });
 
@@ -264,15 +299,16 @@ describe('HTTP transport session management', () => {
       const client = createClient();
       const transport = createTransport();
       await client.connect(transport);
-      // Do a lightweight operation to confirm server is functional
       await client.listTools();
       await client.close();
     }
 
-    // Server should still be healthy — session count may be 0 or 1
-    // (the last close may not have fully propagated yet), but status must be ok
+    // Server must still be healthy and accept new connections
     const health = await getHealth();
     assert.strictEqual(health.status, 'ok');
-    assert.ok(health.sessions <= 1, `Expected 0 or 1 sessions, got ${health.sessions}`);
+    assert.ok(
+      health.sessions <= 1,
+      `Expected 0 or 1 sessions, got ${health.sessions}`,
+    );
   });
 });

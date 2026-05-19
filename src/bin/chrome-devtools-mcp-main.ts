@@ -6,8 +6,8 @@
 
 import '../polyfill.js';
 
-import {createServer} from 'node:http';
 import {randomUUID} from 'node:crypto';
+import {createServer} from 'node:http';
 import process from 'node:process';
 
 import {createMcpServer, logDisclaimers} from '../index.js';
@@ -48,17 +48,37 @@ if (args.port) {
 
   // Mutex to serialize initialize requests. McpServer only supports a single
   // transport connection at a time, so concurrent initializes must be queued.
+  //
+  // createNextLock() returns {wait, release} where release() resolves the
+  // returned promise. The Promise constructor calls its callback synchronously,
+  // so release is always defined when createNextLock() returns.
+  function createNextLock(): {wait: Promise<void>; release: () => void} {
+    let release: (() => void) | undefined;
+    const wait = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    if (release === undefined) {
+      throw new Error('Promise callback was not called synchronously');
+    }
+    return {wait, release};
+  }
+
   let initializeLock: Promise<void> = Promise.resolve();
 
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://localhost:${args.port}`);
     if (url.pathname === '/mcp') {
-      const sessionId = req.headers['mcp-session-id'] as string | undefined;
+      const rawSessionId = req.headers['mcp-session-id'];
+      const sessionId = Array.isArray(rawSessionId)
+        ? rawSessionId[0]
+        : rawSessionId;
 
       if (sessionId && sessions.has(sessionId)) {
-        const transport = sessions.get(sessionId)!;
-        await transport.handleRequest(req, res);
-        return;
+        const transport = sessions.get(sessionId);
+        if (transport) {
+          await transport.handleRequest(req, res);
+          return;
+        }
       }
 
       // Parse body for initialization detection
@@ -76,11 +96,9 @@ if (args.port) {
         // Serialize initialize requests to prevent race conditions.
         // Each initialize must fully complete (close old session, connect new)
         // before the next one starts.
-        let releaseLock: () => void;
         const previousLock = initializeLock;
-        initializeLock = new Promise<void>(resolve => {
-          releaseLock = resolve;
-        });
+        const {wait: nextWait, release: releaseLock} = createNextLock();
+        initializeLock = nextWait;
 
         try {
           await previousLock;
@@ -104,14 +122,17 @@ if (args.port) {
             const id = [...sessions.entries()].find(
               ([, t]) => t === transport,
             )?.[0];
-            if (id) sessions.delete(id);
+            if (id) {sessions.delete(id);}
           };
           await server.connect(transport);
           await transport.handleRequest(req, res, jsonBody);
-          // Store session by transport's assigned ID
+          // transport.sessionId is a public getter on StreamableHTTPServerTransport
           const respSessionId =
-            (transport as unknown as {sessionId?: string}).sessionId ??
-            (res.getHeader('mcp-session-id') as string | undefined);
+            transport.sessionId ??
+            ((): string | undefined => {
+              const h = res.getHeader('mcp-session-id');
+              return typeof h === 'string' ? h : undefined;
+            })();
           if (respSessionId) {
             sessions.set(respSessionId, transport);
           }
@@ -122,7 +143,7 @@ if (args.port) {
             res.end(JSON.stringify({error: 'Internal server error'}));
           }
         } finally {
-          releaseLock!();
+          releaseLock();
         }
       } else if (sessionId) {
         res.writeHead(404, {'Content-Type': 'application/json'});
