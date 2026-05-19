@@ -6,11 +6,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {execSync} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import {execSync} from 'node:child_process';
-import {fileURLToPath} from 'node:url';
 import process from 'node:process';
+import {fileURLToPath} from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 9333;
@@ -383,17 +383,17 @@ const {port, action, tailscale} = parseArgs();
 const platform = process.platform;
 
 if (platform === 'darwin') {
-  if (action === 'install') installMacOS(port);
+  if (action === 'install') {installMacOS(port);}
   else if (action === 'uninstall') {
     uninstallTailscale(port);
     uninstallMacOS();
-  } else statusMacOS();
+  } else {statusMacOS();}
 } else if (platform === 'linux') {
-  if (action === 'install') installLinux(port);
+  if (action === 'install') {installLinux(port);}
   else if (action === 'uninstall') {
     uninstallTailscale(port);
     uninstallLinux();
-  } else statusLinux();
+  } else {statusLinux();}
 } else {
   console.error(`❌ Unsupported platform: ${platform}`);
   console.error('   Supported: macOS (launchd), Linux (systemd)');
