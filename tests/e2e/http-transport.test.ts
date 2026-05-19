@@ -48,6 +48,27 @@ function assertHealthResponse(value: unknown): asserts value is HealthResponse {
   }
 }
 
+interface JsonRpcErrorResponse {
+  error: {code: number; message: string};
+}
+
+function assertJsonRpcError(
+  value: unknown,
+): asserts value is JsonRpcErrorResponse {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('error' in value) ||
+    typeof value.error !== 'object' ||
+    value.error === null ||
+    !('code' in value.error)
+  ) {
+    throw new Error(
+      `Invalid JSON-RPC error response: ${JSON.stringify(value)}`,
+    );
+  }
+}
+
 describe('HTTP transport session management', () => {
   let serverProcess: ChildProcess;
   let port: number;
@@ -70,7 +91,9 @@ describe('HTTP transport session management', () => {
     while (Date.now() < deadline) {
       try {
         const res = await fetch(healthUrl);
-        if (res.ok) {return;}
+        if (res.ok) {
+          return;
+        }
       } catch {
         // Server not ready yet
       }
@@ -291,6 +314,58 @@ describe('HTTP transport session management', () => {
       'Second tool call should return content after reconnect',
     );
     await client2.close();
+  });
+
+  it('rejects an unknown session ID with 404 and a JSON-RPC error', async () => {
+    // A request carrying a session ID this process never issued — the typical
+    // shape after a server restart wiped the in-memory session map.
+    const res = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'mcp-session-id': 'does-not-exist',
+      },
+      body: JSON.stringify({jsonrpc: '2.0', method: 'tools/list', id: 1}),
+    });
+    assert.strictEqual(res.status, 404, 'Stale session must return 404');
+    const data: unknown = await res.json();
+    assertJsonRpcError(data);
+    assert.strictEqual(data.error.code, -32001);
+  });
+
+  it('rejects a non-initialize request with no session ID as 400', async () => {
+    const res = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({jsonrpc: '2.0', method: 'tools/list', id: 1}),
+    });
+    assert.strictEqual(res.status, 400);
+    const data: unknown = await res.json();
+    assertJsonRpcError(data);
+    assert.strictEqual(data.error.code, -32000);
+  });
+
+  it('rejects a malformed body with 400 instead of hanging', async () => {
+    // Before the fix, an unparseable body threw out of the async request
+    // handler and the connection hung with no response. Bound the wait so a
+    // regression fails fast instead of stalling the suite.
+    const res = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: '{not valid json',
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.strictEqual(res.status, 400);
+    const data: unknown = await res.json();
+    assertJsonRpcError(data);
+    assert.strictEqual(data.error.code, -32700);
   });
 
   it('survives many connect/disconnect cycles without resource leak', async () => {

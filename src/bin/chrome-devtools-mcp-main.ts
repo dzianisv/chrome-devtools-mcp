@@ -7,7 +7,7 @@
 import '../polyfill.js';
 
 import {randomUUID} from 'node:crypto';
-import {createServer} from 'node:http';
+import {createServer, type ServerResponse} from 'node:http';
 import process from 'node:process';
 
 import {createMcpServer, logDisclaimers} from '../index.js';
@@ -65,8 +65,27 @@ if (args.port) {
 
   let initializeLock: Promise<void> = Promise.resolve();
 
+  // Send a JSON-RPC 2.0 error response. Using the JSON-RPC envelope (rather
+  // than an ad-hoc {error: '...'} object) matches what StreamableHTTPServerTransport
+  // itself emits, so clients see a consistent shape on every failure path.
+  function sendJsonRpcError(
+    res: ServerResponse,
+    httpStatus: number,
+    code: number,
+    message: string,
+  ): void {
+    if (res.headersSent) {
+      return;
+    }
+    res.writeHead(httpStatus, {'Content-Type': 'application/json'});
+    res.end(JSON.stringify({jsonrpc: '2.0', error: {code, message}, id: null}));
+  }
+
   const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://localhost:${args.port}`);
+    console.error(
+      `[HTTP] ${req.method} ${url.pathname} session=${req.headers['mcp-session-id'] ?? 'none'} accept=${req.headers['accept'] ?? 'none'}`,
+    );
     if (url.pathname === '/mcp') {
       const rawSessionId = req.headers['mcp-session-id'];
       const sessionId = Array.isArray(rawSessionId)
@@ -76,23 +95,38 @@ if (args.port) {
       if (sessionId && sessions.has(sessionId)) {
         const transport = sessions.get(sessionId);
         if (transport) {
+          console.error(`[HTTP] routing to existing session ${sessionId}`);
           await transport.handleRequest(req, res);
           return;
         }
       }
 
-      // Parse body for initialization detection
+      // Requests for a known session were already routed above. Anything
+      // reaching here is either a fresh initialize or a request for a session
+      // we don't have. Parse the body defensively: GET (SSE) and DELETE
+      // (teardown) requests carry no body, and a malformed body must not throw
+      // out of this async handler — that would leave the request hanging with
+      // no response.
       const body = await new Promise<string>(resolve => {
         let data = '';
         req.on('data', chunk => (data += chunk));
         req.on('end', () => resolve(data));
       });
 
-      const jsonBody = JSON.parse(body);
-      if (
-        isInitializeRequest(jsonBody) ||
-        (Array.isArray(jsonBody) && jsonBody.some(isInitializeRequest))
-      ) {
+      let jsonBody: unknown;
+      let parseError = false;
+      try {
+        jsonBody = body.length > 0 ? JSON.parse(body) : undefined;
+      } catch {
+        parseError = true;
+      }
+
+      const isInitialize =
+        !parseError &&
+        (isInitializeRequest(jsonBody) ||
+          (Array.isArray(jsonBody) && jsonBody.some(isInitializeRequest)));
+
+      if (isInitialize) {
         // Serialize initialize requests to prevent race conditions.
         // Each initialize must fully complete (close old session, connect new)
         // before the next one starts.
@@ -122,7 +156,12 @@ if (args.port) {
             const id = [...sessions.entries()].find(
               ([, t]) => t === transport,
             )?.[0];
-            if (id) {sessions.delete(id);}
+            if (id) {
+              sessions.delete(id);
+              console.error(
+                `[HTTP] session closed and removed: ${id} (remaining: ${sessions.size})`,
+              );
+            }
           };
           await server.connect(transport);
           await transport.handleRequest(req, res, jsonBody);
@@ -135,6 +174,11 @@ if (args.port) {
             })();
           if (respSessionId) {
             sessions.set(respSessionId, transport);
+            console.error(
+              `[HTTP] new session registered: ${respSessionId} (total: ${sessions.size})`,
+            );
+          } else {
+            console.error(`[HTTP] WARNING: no session ID after initialize`);
           }
         } catch (err) {
           logger('Error handling initialize request:', err);
@@ -146,11 +190,26 @@ if (args.port) {
           releaseLock();
         }
       } else if (sessionId) {
-        res.writeHead(404, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify({error: 'Session not found'}));
+        // Session ID present but unknown to this process — almost always a
+        // session that died with a server restart. 404 is the Streamable HTTP
+        // spec signal that tells a conformant client to start a new session.
+        console.error(
+          `[HTTP] 404 unknown session: ${sessionId} (known: ${[...sessions.keys()].join(', ')})`,
+        );
+        sendJsonRpcError(res, 404, -32001, 'Session not found');
+      } else if (parseError) {
+        console.error(
+          `[HTTP] 400 unparseable body (method=${req.method}, length=${body.length})`,
+        );
+        sendJsonRpcError(res, 400, -32700, 'Parse error: invalid JSON');
       } else {
-        res.writeHead(400, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify({error: 'Missing mcp-session-id header'}));
+        console.error(`[HTTP] 400 missing session id, method=${req.method}`);
+        sendJsonRpcError(
+          res,
+          400,
+          -32000,
+          'Bad Request: Mcp-Session-Id header is required',
+        );
       }
     } else if (url.pathname === '/health') {
       // Health check: verify Chrome is still reachable
@@ -163,7 +222,13 @@ if (args.port) {
         const platform = process.platform;
         let userDataDir: string;
         if (platform === 'darwin') {
-          userDataDir = path.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome');
+          userDataDir = path.join(
+            homeDir,
+            'Library',
+            'Application Support',
+            'Google',
+            'Chrome',
+          );
         } else {
           userDataDir = path.join(homeDir, '.config', 'google-chrome');
         }
@@ -179,7 +244,12 @@ if (args.port) {
             status,
             chrome_connected: chromeRunning,
             sessions: sessions.size,
-            ...(chromeRunning ? {} : {error: 'Chrome DevToolsActivePort not found — is Chrome running?'}),
+            ...(chromeRunning
+              ? {}
+              : {
+                  error:
+                    'Chrome DevToolsActivePort not found — is Chrome running?',
+                }),
           }),
         );
       } catch (err) {
