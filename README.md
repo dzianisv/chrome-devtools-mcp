@@ -1,6 +1,6 @@
 # Chrome DevTools MCP — Multi-Agent Fork
-<img width="1521" height="797" alt="image" src="https://github.com/user-attachments/assets/47169180-a334-4521-ad81-024d2f91853f" />
 
+<img width="1521" height="797" alt="image" src="https://github.com/user-attachments/assets/47169180-a334-4521-ad81-024d2f91853f" />
 
 [![npm @vibebrowser/chrome-devtools-mcp](https://img.shields.io/npm/v/@vibebrowser/chrome-devtools-mcp.svg)](https://npmjs.org/package/@vibebrowser/chrome-devtools-mcp)
 
@@ -65,13 +65,46 @@ npx @vibebrowser/chrome-devtools-mcp uninstall
 
 ## What's Different From Upstream
 
-| | Upstream (`chrome-devtools-mcp`) | This fork (`@vibebrowser/chrome-devtools-mcp`) |
-|---|---|---|
-| Transport | stdio only | stdio + HTTP (StreamableHTTP) |
-| Multi-agent | ❌ One agent per process | ✅ Multiple agents, independent sessions |
-| Deployment | Per-invocation via `npx` | Background service (launchd/systemd) |
-| Remote access | None | Tailscale serve integration |
-| Package | `chrome-devtools-mcp` | `@vibebrowser/chrome-devtools-mcp` |
+|                      | Upstream (`chrome-devtools-mcp`) | This fork (`@vibebrowser/chrome-devtools-mcp`)                                   |
+| -------------------- | -------------------------------- | -------------------------------------------------------------------------------- |
+| Transport            | stdio only                       | stdio **+ Streamable HTTP**                                                      |
+| Concurrent agents    | One per process (stdio)          | **Multiple agents on one server**, each with its own MCP session                 |
+| Session lifecycle    | n/a                              | Idle-TTL reaper, LRU capacity cap, **in-flight requests protected from reaping** |
+| Stale-session signal | n/a                              | Spec-compliant `404 Session not found` with a **JSON-RPC error envelope**        |
+| Defensive HTTP       | n/a                              | Malformed body returns `400` instead of hanging the connection                   |
+| `/health` endpoint   | ❌                               | ✅ Returns Chrome connectivity + active session count                            |
+| Deployment           | Per-invocation via `npx`         | Background service via `install:service` (launchd / systemd)                     |
+| Remote access        | None                             | Tailscale `serve` integration (HTTPS, no public exposure)                        |
+| Agent auto-config    | Manual                           | Auto-detects and configures Claude Code, Copilot CLI, OpenCode                   |
+| Config safety        | n/a                              | Atomic writes; **`~/.claude.json` backup/restore** around `claude mcp` calls     |
+| Package              | `chrome-devtools-mcp`            | `@vibebrowser/chrome-devtools-mcp`                                               |
+
+### How concurrent sessions work
+
+- Each MCP `initialize` over HTTP creates an **independent session** with its own `McpServer` and tool context — a new agent connecting no longer evicts the previous one.
+- All sessions share **one browser instance**. Agents see each other's tabs and DOM state by design (an intentional trade-off — full per-session isolation via `BrowserContext` is a future enhancement; see [#6](https://github.com/dzianisv/chrome-devtools-mcp/issues/6) for the gap inventory).
+- Tool execution across **all** sessions is serialized by a single global mutex, so two agents never stomp the browser mid-action.
+- Sessions left behind by clients that disappear without sending an MCP `DELETE` (the SDK's `client.close()` never sends one) are reclaimed by a **periodic idle-TTL reaper**.
+- The reaper **skips sessions with in-flight work** — a long-running tool call or an open SSE notification stream protects its session from being torn down.
+- The session map is **hard-capped**. When exceeded, the least-recently-active session is evicted (and its session ID will `404` on the next request, telling a conformant client to reconnect).
+
+### HTTP endpoints
+
+| Method   | Path      | Notes                                                                                                                                             |
+| -------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST`   | `/mcp`    | MCP requests. First call must be `initialize`; subsequent calls carry the assigned `Mcp-Session-Id` header.                                       |
+| `GET`    | `/mcp`    | Long-lived SSE notification stream for an existing session.                                                                                       |
+| `DELETE` | `/mcp`    | Clean session teardown. The official MCP SDK client does **not** send this on `close()`; abandoned sessions are reclaimed by the idle-TTL reaper. |
+| `GET`    | `/health` | `{status, chrome_connected, sessions}`. Returns `503` if Chrome is unreachable. Suitable for systemd/launchd health probes.                       |
+
+### Configuration knobs
+
+| Env var                                   | Default           | Effect                                                           |
+| ----------------------------------------- | ----------------- | ---------------------------------------------------------------- |
+| `CHROME_DEVTOOLS_MCP_SESSION_IDLE_TTL_MS` | `600000` (10 min) | How long a session may stay idle before the reaper terminates it |
+| `CHROME_DEVTOOLS_MCP_MAX_SESSIONS`        | `100`             | Hard cap on concurrent sessions; LRU evicts on overflow          |
+| `CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS` | unset             | Disable Google telemetry                                         |
+| `CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS`    | unset             | Skip the npm registry version check on startup                   |
 
 ---
 
