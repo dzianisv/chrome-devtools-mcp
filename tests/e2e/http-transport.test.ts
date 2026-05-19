@@ -69,231 +69,277 @@ function assertJsonRpcError(
   }
 }
 
-describe('HTTP transport session management', () => {
-  let serverProcess: ChildProcess;
-  let port: number;
-  let mcpUrl: string;
-  let healthUrl: string;
+interface TestServer {
+  mcpUrl: string;
+  healthUrl: string;
+  stop(): Promise<void>;
+}
 
-  function createClient(): Client {
-    return new Client(
-      {name: 'http-transport-test', version: '1.0.0'},
-      {capabilities: {}},
-    );
+/** Spawn the MCP server in HTTP mode and wait until it is healthy. */
+async function spawnServer(
+  extraEnv: Record<string, string> = {},
+): Promise<TestServer> {
+  const port = await getFreePort();
+  const mcpUrl = `http://127.0.0.1:${port}/mcp`;
+  const healthUrl = `http://127.0.0.1:${port}/health`;
+
+  const proc: ChildProcess = spawn(
+    'node',
+    [
+      'build/src/bin/chrome-devtools-mcp.js',
+      '--headless',
+      '--isolated',
+      '--executable-path',
+      executablePath(),
+      '--port',
+      String(port),
+    ],
+    {
+      env: {
+        ...process.env,
+        CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: 'true',
+        CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: 'true',
+        ...extraEnv,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+
+  let stderr = '';
+  proc.stderr?.on('data', chunk => {
+    stderr += String(chunk);
+  });
+  proc.on('error', err => {
+    console.error('Server process error:', err);
+  });
+
+  async function stop(): Promise<void> {
+    proc.kill('SIGTERM');
+    await new Promise<void>(resolve => {
+      proc.on('exit', () => resolve());
+      setTimeout(() => {
+        proc.kill('SIGKILL');
+        resolve();
+      }, 5000);
+    });
   }
 
-  function createTransport(): StreamableHTTPClientTransport {
-    return new StreamableHTTPClientTransport(new URL(mcpUrl));
-  }
-
-  async function waitForServer(timeoutMs = 15000): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      try {
-        const res = await fetch(healthUrl);
-        if (res.ok) {
-          return;
-        }
-      } catch {
-        // Server not ready yet
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(healthUrl);
+      if (res.ok) {
+        return {mcpUrl, healthUrl, stop};
       }
-      await new Promise(r => setTimeout(r, 200));
+    } catch {
+      // Server not ready yet
     }
-    throw new Error(`Server did not start within ${timeoutMs}ms`);
+    await new Promise(r => setTimeout(r, 200));
   }
+  console.error('Server stderr:', stderr);
+  await stop();
+  throw new Error('Server did not start within 15000ms');
+}
 
-  async function getHealth(): Promise<HealthResponse> {
-    const res = await fetch(healthUrl);
-    const data: unknown = await res.json();
-    assertHealthResponse(data);
-    return data;
-  }
+function createClient(): Client {
+  return new Client(
+    {name: 'http-transport-test', version: '1.0.0'},
+    {capabilities: {}},
+  );
+}
+
+function createTransport(mcpUrl: string): StreamableHTTPClientTransport {
+  return new StreamableHTTPClientTransport(new URL(mcpUrl));
+}
+
+async function getHealth(healthUrl: string): Promise<HealthResponse> {
+  const res = await fetch(healthUrl);
+  const data: unknown = await res.json();
+  assertHealthResponse(data);
+  return data;
+}
+
+/**
+ * Close a client cleanly. The SDK's client close() does not send an MCP
+ * DELETE, so terminateSession() is called first to release the server-side
+ * session immediately instead of leaving it for the idle reaper.
+ */
+async function closeClient(
+  client: Client,
+  transport: StreamableHTTPClientTransport,
+): Promise<void> {
+  await transport.terminateSession().catch(() => undefined);
+  await client.close().catch(() => undefined);
+}
+
+describe('HTTP transport session management', () => {
+  let server: TestServer;
 
   before(async () => {
-    port = await getFreePort();
-    mcpUrl = `http://127.0.0.1:${port}/mcp`;
-    healthUrl = `http://127.0.0.1:${port}/health`;
-
-    serverProcess = spawn(
-      'node',
-      [
-        'build/src/bin/chrome-devtools-mcp.js',
-        '--headless',
-        '--isolated',
-        '--executable-path',
-        executablePath(),
-        '--port',
-        String(port),
-      ],
-      {
-        env: {
-          ...process.env,
-          CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: 'true',
-          CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: 'true',
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
-
-    let stderr = '';
-    serverProcess.stderr?.on('data', chunk => {
-      stderr += String(chunk);
-    });
-
-    serverProcess.on('error', err => {
-      console.error('Server process error:', err);
-    });
-
-    try {
-      await waitForServer();
-    } catch (e) {
-      console.error('Server stderr:', stderr);
-      throw e;
-    }
+    server = await spawnServer();
   });
 
   after(async () => {
-    if (serverProcess) {
-      serverProcess.kill('SIGTERM');
-      await new Promise<void>(resolve => {
-        serverProcess.on('exit', () => resolve());
-        setTimeout(() => {
-          serverProcess.kill('SIGKILL');
-          resolve();
-        }, 5000);
-      });
-    }
+    await server?.stop();
   });
 
   it('single client can initialize and call tools', async () => {
     const client = createClient();
-    const transport = createTransport();
+    const transport = createTransport(server.mcpUrl);
     try {
       await client.connect(transport);
       const tools = await client.listTools();
       assert.ok(tools.tools.length > 0, 'Should have tools available');
     } finally {
-      await client.close();
+      await closeClient(client, transport);
     }
   });
 
   it('second client can connect after first disconnects cleanly', async () => {
     const client1 = createClient();
-    const transport1 = createTransport();
+    const transport1 = createTransport(server.mcpUrl);
     await client1.connect(transport1);
     const tools1 = await client1.listTools();
     assert.ok(tools1.tools.length > 0);
-    await client1.close();
+    await closeClient(client1, transport1);
 
     const client2 = createClient();
-    const transport2 = createTransport();
+    const transport2 = createTransport(server.mcpUrl);
     await client2.connect(transport2);
     const tools2 = await client2.listTools();
     assert.ok(tools2.tools.length > 0);
-    await client2.close();
+    await closeClient(client2, transport2);
   });
 
   it('second client can connect after first drops the HTTP connection without MCP session teardown', async () => {
     // Simulate an abrupt client loss: close the transport-level HTTP connection
-    // without going through client.close() (which would send an MCP DELETE).
-    // The server sees the SSE stream close but receives no formal termination.
+    // without going through an MCP DELETE. The server keeps that session until
+    // the idle reaper collects it — meanwhile a new client must still connect.
     const client1 = createClient();
-    const transport1 = createTransport();
+    const transport1 = createTransport(server.mcpUrl);
     await client1.connect(transport1);
     const tools1 = await client1.listTools();
     assert.ok(tools1.tools.length > 0);
 
-    // Drop the transport without sending MCP session DELETE
+    // Drop the transport without sending MCP session DELETE.
     transport1.close().catch(() => undefined);
-
-    // Allow server time to notice the stream closure
     await new Promise(r => setTimeout(r, 500));
 
-    // A new client must still be able to initialize and use the server
+    // A new client must still be able to initialize and use the server.
     const client2 = createClient();
-    const transport2 = createTransport();
+    const transport2 = createTransport(server.mcpUrl);
     await client2.connect(transport2);
     const tools2 = await client2.listTools();
     assert.ok(tools2.tools.length > 0);
-    await client2.close();
+    await closeClient(client2, transport2);
   });
 
   it('handles rapid sequential reconnections', async () => {
     for (let i = 0; i < 5; i++) {
       const client = createClient();
-      const transport = createTransport();
+      const transport = createTransport(server.mcpUrl);
       await client.connect(transport);
       const tools = await client.listTools();
       assert.ok(
         tools.tools.length > 0,
         `Connection ${i + 1} should have tools`,
       );
-      await client.close();
+      await closeClient(client, transport);
     }
   });
 
-  it('concurrent initialize requests do not deadlock or crash the server', async () => {
-    // Launch multiple clients simultaneously. With serialized initializes,
-    // each one closes the previous session so some may fail mid-flight —
-    // that is expected. The critical invariants are: no hang, no crash,
-    // and the server must accept a fresh connection afterwards.
+  it('serves multiple concurrent sessions without evicting any', async () => {
+    // Launch several clients simultaneously. They share one browser but each
+    // gets its own session — every one must connect AND remain usable after
+    // the others have connected. Under the old single-session model each new
+    // initialize evicted its predecessors and this would fail.
     const NUM_CONCURRENT = 3;
-    const results = await Promise.allSettled(
+    const before = (await getHealth(server.healthUrl)).sessions;
+    const connections = await Promise.all(
       Array.from({length: NUM_CONCURRENT}, async (_, i) => {
         const client = createClient();
-        const transport = createTransport();
+        const transport = createTransport(server.mcpUrl);
         await client.connect(transport);
         const tools = await client.listTools();
         assert.ok(tools.tools.length > 0, `Client ${i} should get tools`);
-        return client;
+        return {client, transport};
       }),
     );
 
-    // At least one concurrent initialize should succeed
-    const succeeded = results.filter(r => r.status === 'fulfilled');
+    // All sessions are registered at the same time — none evicted the others.
+    const health = await getHealth(server.healthUrl);
     assert.ok(
-      succeeded.length >= 1,
-      `At least one concurrent client should connect, got ${succeeded.length} successes out of ${NUM_CONCURRENT}`,
+      health.sessions >= before + NUM_CONCURRENT,
+      `Expected at least ${before + NUM_CONCURRENT} sessions, got ${health.sessions}`,
     );
+    assert.strictEqual(health.status, 'ok', 'Server should still be healthy');
 
-    // Clean up surviving connections
-    for (const result of succeeded) {
-      if (result.status === 'fulfilled') {
-        await result.value.close().catch(() => undefined);
-      }
+    // Every client is still independently usable after all peers connected.
+    for (const [i, {client}] of connections.entries()) {
+      const tools = await client.listTools();
+      assert.ok(
+        tools.tools.length > 0,
+        `Client ${i} must still work after peer clients connected`,
+      );
     }
 
-    // Critical: verify the server still accepts NEW connections on /mcp
-    // (health alone is insufficient — it can be OK while /mcp hangs)
-    const freshClient = createClient();
-    const freshTransport = createTransport();
-    await freshClient.connect(freshTransport);
-    const freshTools = await freshClient.listTools();
-    assert.ok(
-      freshTools.tools.length > 0,
-      'Server must still accept new /mcp connections after concurrent stress',
-    );
-    await freshClient.close();
-
-    const health = await getHealth();
-    assert.strictEqual(health.status, 'ok', 'Server should still be healthy');
+    for (const {client, transport} of connections) {
+      await closeClient(client, transport);
+    }
   });
 
-  it('server health endpoint reflects active session', async () => {
+  it('an earlier session survives a later session connecting', async () => {
+    // Deterministic no-eviction check: connect A, then B, then prove A still
+    // works. Connecting B must not tear down A's session.
+    const clientA = createClient();
+    const transportA = createTransport(server.mcpUrl);
+    await clientA.connect(transportA);
+    assert.ok((await clientA.listTools()).tools.length > 0);
+
+    const clientB = createClient();
+    const transportB = createTransport(server.mcpUrl);
+    await clientB.connect(transportB);
+    assert.ok((await clientB.listTools()).tools.length > 0);
+
+    const toolsA = await clientA.listTools();
+    assert.ok(
+      toolsA.tools.length > 0,
+      'Client A must still work — connecting client B must not evict it',
+    );
+
+    await closeClient(clientA, transportA);
+    await closeClient(clientB, transportB);
+  });
+
+  it('health endpoint reflects sessions appearing and being reclaimed', async () => {
+    const before = (await getHealth(server.healthUrl)).sessions;
+
     const client = createClient();
-    const transport = createTransport();
+    const transport = createTransport(server.mcpUrl);
     await client.connect(transport);
 
-    const healthDuring = await getHealth();
-    assert.strictEqual(healthDuring.sessions, 1);
-    assert.strictEqual(healthDuring.status, 'ok');
+    const during = await getHealth(server.healthUrl);
+    assert.strictEqual(
+      during.sessions,
+      before + 1,
+      'connecting a client must add exactly one session',
+    );
+    assert.strictEqual(during.status, 'ok');
 
-    await client.close();
+    await closeClient(client, transport);
+    await new Promise(r => setTimeout(r, 300));
+
+    const restored = (await getHealth(server.healthUrl)).sessions;
+    assert.strictEqual(
+      restored,
+      before,
+      'a clean MCP DELETE must remove the session',
+    );
   });
 
   it('client can call tools after reconnecting to a recovered server', async () => {
     const client1 = createClient();
-    const transport1 = createTransport();
+    const transport1 = createTransport(server.mcpUrl);
     await client1.connect(transport1);
     const result1 = await client1.callTool({name: 'list_pages', arguments: {}});
     assert.ok(
@@ -301,25 +347,25 @@ describe('HTTP transport session management', () => {
       'First tool call should return content',
     );
 
-    // Drop without MCP teardown
+    // Drop without MCP teardown.
     transport1.close().catch(() => undefined);
     await new Promise(r => setTimeout(r, 500));
 
     const client2 = createClient();
-    const transport2 = createTransport();
+    const transport2 = createTransport(server.mcpUrl);
     await client2.connect(transport2);
     const result2 = await client2.callTool({name: 'list_pages', arguments: {}});
     assert.ok(
       Array.isArray(result2.content) && result2.content.length > 0,
       'Second tool call should return content after reconnect',
     );
-    await client2.close();
+    await closeClient(client2, transport2);
   });
 
   it('rejects an unknown session ID with 404 and a JSON-RPC error', async () => {
     // A request carrying a session ID this process never issued — the typical
     // shape after a server restart wiped the in-memory session map.
-    const res = await fetch(mcpUrl, {
+    const res = await fetch(server.mcpUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -335,7 +381,7 @@ describe('HTTP transport session management', () => {
   });
 
   it('rejects a non-initialize request with no session ID as 400', async () => {
-    const res = await fetch(mcpUrl, {
+    const res = await fetch(server.mcpUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -353,7 +399,7 @@ describe('HTTP transport session management', () => {
     // Before the fix, an unparseable body threw out of the async request
     // handler and the connection hung with no response. Bound the wait so a
     // regression fails fast instead of stalling the suite.
-    const res = await fetch(mcpUrl, {
+    const res = await fetch(server.mcpUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -368,22 +414,64 @@ describe('HTTP transport session management', () => {
     assert.strictEqual(data.error.code, -32700);
   });
 
-  it('survives many connect/disconnect cycles without resource leak', async () => {
+  it('clean DELETE shutdown reclaims sessions without leaking', async () => {
+    const before = (await getHealth(server.healthUrl)).sessions;
     const CYCLES = 20;
     for (let i = 0; i < CYCLES; i++) {
       const client = createClient();
-      const transport = createTransport();
+      const transport = createTransport(server.mcpUrl);
       await client.connect(transport);
       await client.listTools();
-      await client.close();
+      await closeClient(client, transport);
     }
+    await new Promise(r => setTimeout(r, 300));
 
-    // Server must still be healthy and accept new connections
-    const health = await getHealth();
+    const health = await getHealth(server.healthUrl);
     assert.strictEqual(health.status, 'ok');
-    assert.ok(
-      health.sessions <= 1,
-      `Expected 0 or 1 sessions, got ${health.sessions}`,
+    assert.strictEqual(
+      health.sessions,
+      before,
+      `Session count should return to ${before} after clean cycles, got ${health.sessions}`,
     );
+  });
+});
+
+describe('HTTP transport idle session reaping', () => {
+  let server: TestServer;
+
+  before(async () => {
+    // A short idle TTL so the reaper can be observed within the test.
+    server = await spawnServer({
+      CHROME_DEVTOOLS_MCP_SESSION_IDLE_TTL_MS: '2000',
+    });
+  });
+
+  after(async () => {
+    await server?.stop();
+  });
+
+  it('reaps a session left idle past the TTL', async () => {
+    const before = (await getHealth(server.healthUrl)).sessions;
+
+    const client = createClient();
+    const transport = createTransport(server.mcpUrl);
+    await client.connect(transport);
+    assert.strictEqual(
+      (await getHealth(server.healthUrl)).sessions,
+      before + 1,
+      'session should be registered after connect',
+    );
+
+    // Stay idle well past the 2s TTL and at least one reaper sweep.
+    await new Promise(r => setTimeout(r, 7000));
+
+    const after = (await getHealth(server.healthUrl)).sessions;
+    assert.strictEqual(
+      after,
+      before,
+      'an idle session must be reaped once it passes the TTL',
+    );
+
+    await client.close().catch(() => undefined);
   });
 });

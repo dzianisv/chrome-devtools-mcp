@@ -12,8 +12,10 @@ import process from 'node:process';
 
 import {createMcpServer, logDisclaimers} from '../index.js';
 import {logger, saveLogsToFile} from '../logger.js';
+import {Mutex} from '../Mutex.js';
 import {ClearcutLogger} from '../telemetry/ClearcutLogger.js';
 import {computeFlagUsage} from '../telemetry/flagUtils.js';
+import {FilePersistence} from '../telemetry/persistence.js';
 import {
   StdioServerTransport,
   StreamableHTTPServerTransport,
@@ -32,6 +34,20 @@ export const args = parseArguments(VERSION);
 
 const logFile = args.logFile ? saveLogsToFile(args.logFile) : undefined;
 
+// Telemetry is process-scoped, not server-scoped. Initialize it once here so
+// that in HTTP mode (where an McpServer is created per session) it is ready
+// before any session connects and the server-start event is recorded.
+if (args.usageStatistics) {
+  ClearcutLogger.initialize({
+    persistence: new FilePersistence(),
+    logFile: args.logFile,
+    appVersion: VERSION,
+    clearcutEndpoint: args.clearcutEndpoint,
+    clearcutForceFlushIntervalMs: args.clearcutForceFlushIntervalMs,
+    clearcutIncludePidHeader: args.clearcutIncludePidHeader,
+  });
+}
+
 if (process.env['CHROME_DEVTOOLS_MCP_CRASH_ON_UNCAUGHT'] !== 'true') {
   process.on('unhandledRejection', (reason, promise) => {
     logger('Unhandled promise rejection', promise, reason);
@@ -39,31 +55,84 @@ if (process.env['CHROME_DEVTOOLS_MCP_CRASH_ON_UNCAUGHT'] !== 'true') {
 }
 
 logger(`Starting Chrome DevTools MCP Server v${VERSION}`);
-const {server} = await createMcpServer(args, {
-  logFile,
-});
 
 if (args.port) {
-  const sessions = new Map<string, StreamableHTTPServerTransport>();
+  // Each MCP session owns its own McpServer + McpContext but shares one
+  // browser. `dispose` releases that session's collectors/listeners when it
+  // disconnects. Holding multiple entries concurrently is expected — a new
+  // session no longer evicts existing ones.
+  interface Session {
+    transport: StreamableHTTPServerTransport;
+    dispose: () => void;
+    /** Epoch ms of the last request routed to this session; drives reaping. */
+    lastActivity: number;
+  }
+  const sessions = new Map<string, Session>();
 
-  // Mutex to serialize initialize requests. McpServer only supports a single
-  // transport connection at a time, so concurrent initializes must be queued.
-  //
-  // createNextLock() returns {wait, release} where release() resolves the
-  // returned promise. The Promise constructor calls its callback synchronously,
-  // so release is always defined when createNextLock() returns.
-  function createNextLock(): {wait: Promise<void>; release: () => void} {
-    let release: (() => void) | undefined;
-    const wait = new Promise<void>(resolve => {
-      release = resolve;
-    });
-    if (release === undefined) {
-      throw new Error('Promise callback was not called synchronously');
+  // The Streamable HTTP client SDK does not send an MCP DELETE on close() — it
+  // just drops the connection. Without the old "evict on initialize" behaviour
+  // nothing would ever reclaim those sessions, so the server reaps them itself:
+  // idle sessions are terminated after a TTL, and a hard cap bounds memory even
+  // under a flood of connects. Both are overridable via env for tests/tuning.
+  function readPositiveIntEnv(name: string, fallback: number): number {
+    const raw = process.env[name];
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  }
+  const SESSION_IDLE_TTL_MS = readPositiveIntEnv(
+    'CHROME_DEVTOOLS_MCP_SESSION_IDLE_TTL_MS',
+    10 * 60_000,
+  );
+  const MAX_SESSIONS = readPositiveIntEnv(
+    'CHROME_DEVTOOLS_MCP_MAX_SESSIONS',
+    100,
+  );
+
+  // One mutex shared across every session. Sessions share a single browser,
+  // so tool execution must stay globally serialized even though each session
+  // has its own McpServer.
+  const toolMutex = new Mutex();
+
+  // Remove a session and release its resources. Idempotent: the map entry is
+  // deleted synchronously up front, so a re-entrant call (e.g. the transport's
+  // own onclose firing from the close() below) is a harmless no-op. This is
+  // the single place a session is torn down — reaping, capacity eviction and
+  // client-initiated DELETE all funnel through here.
+  function removeSession(id: string, reason: string): void {
+    const session = sessions.get(id);
+    if (!session) {
+      return;
     }
-    return {wait, release};
+    sessions.delete(id);
+    console.error(
+      `[HTTP] session removed: ${id} (${reason}, remaining: ${sessions.size})`,
+    );
+    try {
+      session.dispose();
+    } catch (err) {
+      logger(`Error disposing session ${id}:`, err);
+    }
+    void session.transport.close().catch(err => {
+      logger(`Error closing transport for session ${id}:`, err);
+    });
   }
 
-  let initializeLock: Promise<void> = Promise.resolve();
+  // Periodically reap sessions with no traffic for longer than the TTL. This
+  // is the only thing that reclaims clients that vanished without an MCP
+  // DELETE (crash, network loss, SDK close()). unref() so it never keeps the
+  // process alive on its own.
+  const reaper = setInterval(
+    () => {
+      const cutoff = Date.now() - SESSION_IDLE_TTL_MS;
+      for (const [id, session] of sessions) {
+        if (session.lastActivity < cutoff) {
+          removeSession(id, 'idle');
+        }
+      }
+    },
+    Math.min(SESSION_IDLE_TTL_MS, 60_000),
+  );
+  reaper.unref();
 
   // Send a JSON-RPC 2.0 error response. Using the JSON-RPC envelope (rather
   // than an ad-hoc {error: '...'} object) matches what StreamableHTTPServerTransport
@@ -93,10 +162,11 @@ if (args.port) {
         : rawSessionId;
 
       if (sessionId && sessions.has(sessionId)) {
-        const transport = sessions.get(sessionId);
-        if (transport) {
+        const session = sessions.get(sessionId);
+        if (session) {
           console.error(`[HTTP] routing to existing session ${sessionId}`);
-          await transport.handleRequest(req, res);
+          session.lastActivity = Date.now();
+          await session.transport.handleRequest(req, res);
           return;
         }
       }
@@ -127,40 +197,28 @@ if (args.port) {
           (Array.isArray(jsonBody) && jsonBody.some(isInitializeRequest)));
 
       if (isInitialize) {
-        // Serialize initialize requests to prevent race conditions.
-        // Each initialize must fully complete (close old session, connect new)
-        // before the next one starts.
-        const previousLock = initializeLock;
-        const {wait: nextWait, release: releaseLock} = createNextLock();
-        initializeLock = nextWait;
-
+        // Each initialize creates an independent session: its own McpServer
+        // and McpContext over the shared browser. Sessions no longer evict
+        // one another, so concurrent initializes need no serialization —
+        // browser launch stays serialized by the shared tool mutex.
         try {
-          await previousLock;
-
-          // Close all existing sessions before connecting a new one.
-          // McpServer only supports a single transport connection at a time,
-          // so we must disconnect the previous transport to avoid hangs.
-          for (const [id, existingTransport] of sessions) {
-            try {
-              await existingTransport.close();
-            } catch {
-              // Ignore close errors on stale transports
-            }
-            sessions.delete(id);
-          }
+          const {server, dispose} = await createMcpServer(args, {
+            logFile,
+            toolMutex,
+          });
 
           const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
           });
+          // Fires on a client-initiated DELETE or any transport-level close.
+          // removeSession is idempotent, so a close() we triggered ourselves
+          // (reaping/capacity) re-entering here is a safe no-op.
           transport.onclose = () => {
             const id = [...sessions.entries()].find(
-              ([, t]) => t === transport,
+              ([, s]) => s.transport === transport,
             )?.[0];
             if (id) {
-              sessions.delete(id);
-              console.error(
-                `[HTTP] session closed and removed: ${id} (remaining: ${sessions.size})`,
-              );
+              removeSession(id, 'client-closed');
             }
           };
           await server.connect(transport);
@@ -173,11 +231,34 @@ if (args.port) {
               return typeof h === 'string' ? h : undefined;
             })();
           if (respSessionId) {
-            sessions.set(respSessionId, transport);
+            sessions.set(respSessionId, {
+              transport,
+              dispose,
+              lastActivity: Date.now(),
+            });
             console.error(
               `[HTTP] new session registered: ${respSessionId} (total: ${sessions.size})`,
             );
+            // Enforce the cap by evicting the least-recently-active session.
+            // removeSession deletes synchronously, so the loop makes progress.
+            while (sessions.size > MAX_SESSIONS) {
+              let oldestId: string | undefined;
+              let oldest = Infinity;
+              for (const [id, s] of sessions) {
+                if (id !== respSessionId && s.lastActivity < oldest) {
+                  oldest = s.lastActivity;
+                  oldestId = id;
+                }
+              }
+              if (!oldestId) {
+                break;
+              }
+              removeSession(oldestId, 'capacity');
+            }
           } else {
+            // No session ID was issued — the connection is unusable. Dispose
+            // immediately so the McpContext is not leaked.
+            dispose();
             console.error(`[HTTP] WARNING: no session ID after initialize`);
           }
         } catch (err) {
@@ -186,8 +267,6 @@ if (args.port) {
             res.writeHead(500, {'Content-Type': 'application/json'});
             res.end(JSON.stringify({error: 'Internal server error'}));
           }
-        } finally {
-          releaseLock();
         }
       } else if (sessionId) {
         // Session ID present but unknown to this process — almost always a
@@ -277,6 +356,8 @@ if (args.port) {
     );
   });
 } else {
+  // Stdio mode is inherently single-session: one client, one McpServer.
+  const {server} = await createMcpServer(args, {logFile});
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
