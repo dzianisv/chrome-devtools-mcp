@@ -14,7 +14,6 @@ import {logger} from './logger.js';
 import {McpContext} from './McpContext.js';
 import {Mutex} from './Mutex.js';
 import {ClearcutLogger} from './telemetry/ClearcutLogger.js';
-import {FilePersistence} from './telemetry/persistence.js';
 import {
   McpServer,
   type CallToolResult,
@@ -33,19 +32,15 @@ export async function createMcpServer(
   serverArgs: ReturnType<typeof parseArguments>,
   options: {
     logFile?: fs.WriteStream;
+    /**
+     * Mutex serializing tool execution. When the HTTP server hosts multiple
+     * concurrent sessions they all share one browser, so a single mutex shared
+     * across every session keeps tool calls serialized. Omit it (stdio mode,
+     * single session) and a fresh per-server mutex is created.
+     */
+    toolMutex?: Mutex;
   },
 ) {
-  if (serverArgs.usageStatistics) {
-    ClearcutLogger.initialize({
-      persistence: new FilePersistence(),
-      logFile: serverArgs.logFile,
-      appVersion: VERSION,
-      clearcutEndpoint: serverArgs.clearcutEndpoint,
-      clearcutForceFlushIntervalMs: serverArgs.clearcutForceFlushIntervalMs,
-      clearcutIncludePidHeader: serverArgs.clearcutIncludePidHeader,
-    });
-  }
-
   const server = new McpServer(
     {
       name: 'chrome_devtools',
@@ -139,7 +134,7 @@ export async function createMcpServer(
     return context;
   }
 
-  const toolMutex = new Mutex();
+  const toolMutex = options.toolMutex ?? new Mutex();
 
   function registerTool(tool: ToolDefinition | DefinedPageTool): void {
     const toolHandler = new ToolHandler(
@@ -173,7 +168,14 @@ export async function createMcpServer(
 
   await loadIssueDescriptions();
 
-  return {server};
+  // Releases this session's resources (collectors, CDP listeners, page
+  // wrappers). Deliberately does not close the shared browser — McpContext
+  // leaves that to the process. Safe to call when a session disconnects.
+  function dispose(): void {
+    context?.dispose();
+  }
+
+  return {server, dispose};
 }
 
 export const logDisclaimers = (args: ReturnType<typeof parseArguments>) => {
