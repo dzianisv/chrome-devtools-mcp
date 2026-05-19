@@ -278,6 +278,25 @@ function statusMacOS() {
   }
 }
 
+function detectChromeConnectFlag(): string {
+  // If Chrome is running with --remote-debugging-port, use --browserUrl
+  try {
+    const output = execSync(
+      'ps aux | grep -E "remote-debugging-port" | grep -v grep',
+      {encoding: 'utf-8', stdio: 'pipe'},
+    );
+    const portMatch = output.match(/--remote-debugging-port=(\d+)/);
+    if (portMatch) {
+      const debugPort = portMatch[1];
+      return `--browserUrl http://127.0.0.1:${debugPort}`;
+    }
+  } catch {
+    // no Chrome with remote debugging found
+  }
+  // Fallback to autoConnect (requires DevToolsActivePort in default profile)
+  return '--autoConnect';
+}
+
 function installLinux(port: number) {
   const templatePath = path.resolve(
     __dirname,
@@ -286,9 +305,13 @@ function installLinux(port: number) {
   );
   const template = fs.readFileSync(templatePath, 'utf-8');
 
+  const connectFlag = detectChromeConnectFlag();
+  console.log(`   Chrome connection: ${connectFlag}`);
+
   const service = template
     .replaceAll('{{NODE_PATH}}', getNodePath())
     .replaceAll('{{BIN_PATH}}', getBinPath())
+    .replaceAll('{{CONNECT_FLAG}}', connectFlag)
     .replaceAll('{{PORT}}', String(port));
 
   const serviceDir = path.join(

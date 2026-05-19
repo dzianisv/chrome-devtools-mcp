@@ -1,4 +1,6 @@
 # Chrome DevTools MCP — Multi-Agent Fork
+<img width="1521" height="797" alt="image" src="https://github.com/user-attachments/assets/47169180-a334-4521-ad81-024d2f91853f" />
+
 
 [![npm @vibebrowser/chrome-devtools-mcp](https://img.shields.io/npm/v/@vibebrowser/chrome-devtools-mcp.svg)](https://npmjs.org/package/@vibebrowser/chrome-devtools-mcp)
 

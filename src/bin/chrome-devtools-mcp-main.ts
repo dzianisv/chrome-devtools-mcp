@@ -292,27 +292,48 @@ if (args.port) {
       }
     } else if (url.pathname === '/health') {
       // Health check: verify Chrome is still reachable
-      // createMcpServer connects to Chrome at startup — if we're here, it succeeded.
-      // Check if Chrome's DevToolsActivePort still exists (Chrome hasn't been closed).
       try {
-        const fs = await import('node:fs');
-        const path = await import('node:path');
-        const homeDir = process.env['HOME'] || '/tmp';
-        const platform = process.platform;
-        let userDataDir: string;
-        if (platform === 'darwin') {
-          userDataDir = path.join(
-            homeDir,
-            'Library',
-            'Application Support',
-            'Google',
-            'Chrome',
-          );
+        let chromeRunning = false;
+
+        if (args.browserUrl) {
+          // When using --browserUrl, check Chrome's HTTP endpoint directly
+          const http = await import('node:http');
+          chromeRunning = await new Promise<boolean>(resolve => {
+            const checkUrl = new URL(
+              '/json/version',
+              args.browserUrl as string,
+            );
+            const checkReq = http.get(checkUrl, {timeout: 2000}, checkRes => {
+              resolve(checkRes.statusCode === 200);
+              checkRes.resume();
+            });
+            checkReq.on('error', () => resolve(false));
+            checkReq.on('timeout', () => {
+              checkReq.destroy();
+              resolve(false);
+            });
+          });
         } else {
-          userDataDir = path.join(homeDir, '.config', 'google-chrome');
+          // Fallback: check DevToolsActivePort file
+          const fs = await import('node:fs');
+          const path = await import('node:path');
+          const homeDir = process.env['HOME'] || '/tmp';
+          const platform = process.platform;
+          let userDataDir: string;
+          if (platform === 'darwin') {
+            userDataDir = path.join(
+              homeDir,
+              'Library',
+              'Application Support',
+              'Google',
+              'Chrome',
+            );
+          } else {
+            userDataDir = path.join(homeDir, '.config', 'google-chrome');
+          }
+          const portFile = path.join(userDataDir, 'DevToolsActivePort');
+          chromeRunning = fs.existsSync(portFile);
         }
-        const portFile = path.join(userDataDir, 'DevToolsActivePort');
-        const chromeRunning = fs.existsSync(portFile);
 
         const status = chromeRunning ? 'ok' : 'error';
         res.writeHead(chromeRunning ? 200 : 503, {
@@ -323,12 +344,7 @@ if (args.port) {
             status,
             chrome_connected: chromeRunning,
             sessions: sessions.size,
-            ...(chromeRunning
-              ? {}
-              : {
-                  error:
-                    'Chrome DevToolsActivePort not found — is Chrome running?',
-                }),
+            ...(chromeRunning ? {} : {error: 'Chrome is not reachable'}),
           }),
         );
       } catch (err) {
