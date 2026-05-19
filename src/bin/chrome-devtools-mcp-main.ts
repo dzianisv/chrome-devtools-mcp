@@ -66,6 +66,14 @@ if (args.port) {
     dispose: () => void;
     /** Epoch ms of the last request routed to this session; drives reaping. */
     lastActivity: number;
+    /**
+     * Requests currently being handled (POSTs in flight + the long-lived GET
+     * SSE stream while a client holds it open). The reaper must not touch a
+     * session with work in flight — that would dispose the McpContext under
+     * the handler's feet, or kill the notification stream of a client that is
+     * connected and just idle.
+     */
+    activeRequests: number;
   }
   const sessions = new Map<string, Session>();
 
@@ -125,7 +133,11 @@ if (args.port) {
     () => {
       const cutoff = Date.now() - SESSION_IDLE_TTL_MS;
       for (const [id, session] of sessions) {
-        if (session.lastActivity < cutoff) {
+        // A session with work in flight (POST being handled, or the GET SSE
+        // stream still open) is NOT idle even if lastActivity is stale —
+        // skip it. Capacity eviction is the only path that can override this
+        // and still claim an active session, since the cap is a hard limit.
+        if (session.activeRequests === 0 && session.lastActivity < cutoff) {
           removeSession(id, 'idle');
         }
       }
@@ -165,8 +177,17 @@ if (args.port) {
         const session = sessions.get(sessionId);
         if (session) {
           console.error(`[HTTP] routing to existing session ${sessionId}`);
+          // Track in-flight work so the reaper doesn't tear the session down
+          // mid-handler. Bumping lastActivity in finally too means a slow tool
+          // call doesn't get reaped just because its request arrived long ago.
           session.lastActivity = Date.now();
-          await session.transport.handleRequest(req, res);
+          session.activeRequests++;
+          try {
+            await session.transport.handleRequest(req, res);
+          } finally {
+            session.activeRequests--;
+            session.lastActivity = Date.now();
+          }
           return;
         }
       }
@@ -235,6 +256,7 @@ if (args.port) {
               transport,
               dispose,
               lastActivity: Date.now(),
+              activeRequests: 0,
             });
             console.error(
               `[HTTP] new session registered: ${respSessionId} (total: ${sessions.size})`,
