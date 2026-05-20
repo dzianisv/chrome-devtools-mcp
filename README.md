@@ -791,6 +791,10 @@ The Chrome DevTools MCP server supports the following configuration option:
   - **Type:** boolean
   - **Default:** `false`
 
+- **`--port`, `-p`**
+  If specified, starts a Streamable HTTP transport on the given port instead of stdio. Allows multiple agents to connect to the same MCP server instance over HTTP.
+  - **Type:** number
+
 <!-- END AUTO GENERATED OPTIONS -->
 
 Pass them via the `args` property in the JSON configuration. For example:
