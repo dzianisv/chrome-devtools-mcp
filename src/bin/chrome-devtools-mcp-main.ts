@@ -10,6 +10,7 @@ import {randomUUID} from 'node:crypto';
 import {createServer, type ServerResponse} from 'node:http';
 import process from 'node:process';
 
+import {isBrowserConnected} from '../browser.js';
 import {createMcpServer, logDisclaimers} from '../index.js';
 import {logger, saveLogsToFile} from '../logger.js';
 import {Mutex} from '../Mutex.js';
@@ -315,9 +316,9 @@ if (args.port) {
     } else if (url.pathname === '/health') {
       // Health check: verify Chrome is still reachable
       try {
-        let chromeRunning = false;
+        let chromeRunning = isBrowserConnected();
 
-        if (args.browserUrl) {
+        if (!chromeRunning && args.browserUrl) {
           // When using --browserUrl, check Chrome's HTTP endpoint directly
           const http = await import('node:http');
           chromeRunning = await new Promise<boolean>(resolve => {
@@ -335,30 +336,10 @@ if (args.port) {
               resolve(false);
             });
           });
-        } else {
-          // Fallback: check DevToolsActivePort file
-          const fs = await import('node:fs');
-          const path = await import('node:path');
-          const homeDir = process.env['HOME'] || '/tmp';
-          const platform = process.platform;
-          let userDataDir: string;
-          if (platform === 'darwin') {
-            userDataDir = path.join(
-              homeDir,
-              'Library',
-              'Application Support',
-              'Google',
-              'Chrome',
-            );
-          } else {
-            userDataDir = path.join(homeDir, '.config', 'google-chrome');
-          }
-          const portFile = path.join(userDataDir, 'DevToolsActivePort');
-          chromeRunning = fs.existsSync(portFile);
         }
 
-        const status = chromeRunning ? 'ok' : 'error';
-        res.writeHead(chromeRunning ? 200 : 503, {
+        const status = chromeRunning ? 'ok' : 'degraded';
+        res.writeHead(200, {
           'Content-Type': 'application/json',
         });
         res.end(
@@ -366,7 +347,7 @@ if (args.port) {
             status,
             chrome_connected: chromeRunning,
             sessions: sessions.size,
-            ...(chromeRunning ? {} : {error: 'Chrome is not reachable'}),
+            ...(chromeRunning ? {} : {error: 'Chrome is not connected yet'}),
           }),
         );
       } catch (err) {

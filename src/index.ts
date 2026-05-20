@@ -15,6 +15,7 @@ import {McpContext} from './McpContext.js';
 import {Mutex} from './Mutex.js';
 import {ClearcutLogger} from './telemetry/ClearcutLogger.js';
 import {
+  type Browser,
   McpServer,
   type CallToolResult,
   SetLevelRequestSchema,
@@ -27,6 +28,49 @@ import {createTools} from './tools/tools.js';
 import {VERSION} from './version.js';
 
 export {buildFlag} from './ToolHandler.js';
+
+export async function ensureMcpBrowser(
+  serverArgs: ReturnType<typeof parseArguments>,
+  options: {logFile?: fs.WriteStream},
+): Promise<Browser> {
+  const chromeArgs: string[] = (serverArgs.chromeArg ?? []).map(String);
+  const ignoreDefaultChromeArgs: string[] = (
+    serverArgs.ignoreDefaultChromeArg ?? []
+  ).map(String);
+  if (serverArgs.proxyServer) {
+    chromeArgs.push(`--proxy-server=${serverArgs.proxyServer}`);
+  }
+  const devtools = serverArgs.experimentalDevtools ?? false;
+  return serverArgs.browserUrl ||
+    serverArgs.wsEndpoint ||
+    serverArgs.autoConnect
+    ? await ensureBrowserConnected({
+        browserURL: serverArgs.browserUrl,
+        wsEndpoint: serverArgs.wsEndpoint,
+        wsHeaders: serverArgs.wsHeaders,
+        // Important: only pass channel, if autoConnect is true.
+        channel: serverArgs.autoConnect
+          ? (serverArgs.channel as Channel)
+          : undefined,
+        userDataDir: serverArgs.userDataDir,
+        devtools,
+      })
+    : await ensureBrowserLaunched({
+        headless: serverArgs.headless,
+        executablePath: serverArgs.executablePath,
+        channel: serverArgs.channel as Channel,
+        isolated: serverArgs.isolated ?? false,
+        userDataDir: serverArgs.userDataDir,
+        logFile: options.logFile,
+        viewport: serverArgs.viewport,
+        chromeArgs,
+        ignoreDefaultChromeArgs,
+        acceptInsecureCerts: serverArgs.acceptInsecureCerts,
+        devtools,
+        enableExtensions: serverArgs.categoryExtensions,
+        viaCli: serverArgs.viaCli,
+      });
+}
 
 export async function createMcpServer(
   serverArgs: ReturnType<typeof parseArguments>,
@@ -86,44 +130,10 @@ export async function createMcpServer(
 
   let context: McpContext;
   async function getContext(): Promise<McpContext> {
-    const chromeArgs: string[] = (serverArgs.chromeArg ?? []).map(String);
-    const ignoreDefaultChromeArgs: string[] = (
-      serverArgs.ignoreDefaultChromeArg ?? []
-    ).map(String);
-    if (serverArgs.proxyServer) {
-      chromeArgs.push(`--proxy-server=${serverArgs.proxyServer}`);
-    }
-    const devtools = serverArgs.experimentalDevtools ?? false;
-    const browser =
-      serverArgs.browserUrl || serverArgs.wsEndpoint || serverArgs.autoConnect
-        ? await ensureBrowserConnected({
-            browserURL: serverArgs.browserUrl,
-            wsEndpoint: serverArgs.wsEndpoint,
-            wsHeaders: serverArgs.wsHeaders,
-            // Important: only pass channel, if autoConnect is true.
-            channel: serverArgs.autoConnect
-              ? (serverArgs.channel as Channel)
-              : undefined,
-            userDataDir: serverArgs.userDataDir,
-            devtools,
-          })
-        : await ensureBrowserLaunched({
-            headless: serverArgs.headless,
-            executablePath: serverArgs.executablePath,
-            channel: serverArgs.channel as Channel,
-            isolated: serverArgs.isolated ?? false,
-            userDataDir: serverArgs.userDataDir,
-            logFile: options.logFile,
-            viewport: serverArgs.viewport,
-            chromeArgs,
-            ignoreDefaultChromeArgs,
-            acceptInsecureCerts: serverArgs.acceptInsecureCerts,
-            devtools,
-            enableExtensions: serverArgs.categoryExtensions,
-            viaCli: serverArgs.viaCli,
-          });
+    const browser = await ensureMcpBrowser(serverArgs, options);
 
     if (context?.browser !== browser) {
+      const devtools = serverArgs.experimentalDevtools ?? false;
       context = await McpContext.from(browser, logger, {
         experimentalDevToolsDebugging: devtools,
         experimentalIncludeAllPages: serverArgs.experimentalIncludeAllPages,
