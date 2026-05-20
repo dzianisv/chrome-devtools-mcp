@@ -1,6 +1,6 @@
 # Chrome DevTools MCP — Multi-Agent Fork
-<img width="1521" height="797" alt="image" src="https://github.com/user-attachments/assets/47169180-a334-4521-ad81-024d2f91853f" />
 
+<img width="1521" height="797" alt="image" src="https://github.com/user-attachments/assets/47169180-a334-4521-ad81-024d2f91853f" />
 
 [![npm @vibebrowser/chrome-devtools-mcp](https://img.shields.io/npm/v/@vibebrowser/chrome-devtools-mcp.svg)](https://npmjs.org/package/@vibebrowser/chrome-devtools-mcp)
 
@@ -65,13 +65,13 @@ npx @vibebrowser/chrome-devtools-mcp uninstall
 
 ## What's Different From Upstream
 
-| | Upstream (`chrome-devtools-mcp`) | This fork (`@vibebrowser/chrome-devtools-mcp`) |
-|---|---|---|
-| Transport | stdio only | stdio + HTTP (StreamableHTTP) |
-| Multi-agent | ❌ One agent per process | ✅ Multiple agents, independent sessions |
-| Deployment | Per-invocation via `npx` | Background service (launchd/systemd) |
-| Remote access | None | Tailscale serve integration |
-| Package | `chrome-devtools-mcp` | `@vibebrowser/chrome-devtools-mcp` |
+|               | Upstream (`chrome-devtools-mcp`) | This fork (`@vibebrowser/chrome-devtools-mcp`) |
+| ------------- | -------------------------------- | ---------------------------------------------- |
+| Transport     | stdio only                       | stdio + HTTP (StreamableHTTP)                  |
+| Multi-agent   | ❌ One agent per process         | ✅ Multiple agents, independent sessions       |
+| Deployment    | Per-invocation via `npx`         | Background service (launchd/systemd)           |
+| Remote access | None                             | Tailscale serve integration                    |
+| Package       | `chrome-devtools-mcp`            | `@vibebrowser/chrome-devtools-mcp`             |
 
 ---
 
@@ -757,6 +757,10 @@ The Chrome DevTools MCP server supports the following configuration option:
   If true, redacts some of the network headers considered senstive before returning to the client.
   - **Type:** boolean
   - **Default:** `false`
+
+- **`--port`, `-p`**
+  If specified, starts a Streamable HTTP transport on the given port instead of stdio. Allows multiple agents to connect to the same MCP server instance over HTTP.
+  - **Type:** number
 
 <!-- END AUTO GENERATED OPTIONS -->
 

@@ -6,8 +6,8 @@
 
 import '../polyfill.js';
 
-import {createServer} from 'node:http';
 import {randomUUID} from 'node:crypto';
+import {createServer} from 'node:http';
 import process from 'node:process';
 
 import {createMcpServer, logDisclaimers} from '../index.js';
@@ -76,7 +76,9 @@ if (args.port) {
           const id = [...sessions.entries()].find(
             ([, t]) => t === transport,
           )?.[0];
-          if (id) sessions.delete(id);
+          if (id) {
+            sessions.delete(id);
+          }
         };
         await server.connect(transport);
         await transport.handleRequest(req, res, jsonBody);
@@ -103,13 +105,19 @@ if (args.port) {
           // When using --browserUrl, check Chrome's HTTP endpoint directly
           const http = await import('node:http');
           chromeRunning = await new Promise<boolean>(resolve => {
-            const checkUrl = new URL('/json/version', args.browserUrl as string);
-            const checkReq = http.get(checkUrl, {timeout: 2000}, (checkRes) => {
+            const checkUrl = new URL(
+              '/json/version',
+              args.browserUrl as string,
+            );
+            const checkReq = http.get(checkUrl, {timeout: 2000}, checkRes => {
               resolve(checkRes.statusCode === 200);
               checkRes.resume();
             });
             checkReq.on('error', () => resolve(false));
-            checkReq.on('timeout', () => { checkReq.destroy(); resolve(false); });
+            checkReq.on('timeout', () => {
+              checkReq.destroy();
+              resolve(false);
+            });
           });
         } else {
           // Fallback: check DevToolsActivePort file
@@ -119,7 +127,13 @@ if (args.port) {
           const platform = process.platform;
           let userDataDir: string;
           if (platform === 'darwin') {
-            userDataDir = path.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome');
+            userDataDir = path.join(
+              homeDir,
+              'Library',
+              'Application Support',
+              'Google',
+              'Chrome',
+            );
           } else {
             userDataDir = path.join(homeDir, '.config', 'google-chrome');
           }
