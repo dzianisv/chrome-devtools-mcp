@@ -48,12 +48,12 @@ If the URL is unset, ask the user once for the endpoint. Conventional shape: `ht
 
 Connection-time flags:
 
-| Situation                                                                                   | What to pass                                                                                                |
-| ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Self-signed cert (common on tailnets without Tailscale-issued certs)                        | `--insecure` on every call, or `export CHROME_DEVTOOLS_MCP_REMOTE_INSECURE=1`                               |
-| Bearer-token gateway                                                                        | `--header "Authorization: Bearer $TOKEN"` — repeatable, **not** cached, must be on every invocation         |
-| Custom static header (e.g. `X-Tenant: foo`)                                                 | `--header "X-Tenant: foo"`                                                                                  |
-| Endpoint behind Tailscale and `status` returns `Failed to reach remote`                     | `tailscale status` locally; the box is offline or the URL has the wrong hostname                            |
+| Situation                                                               | What to pass                                                                                        |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Self-signed cert (common on tailnets without Tailscale-issued certs)    | `--insecure` on every call, or `export CHROME_DEVTOOLS_MCP_REMOTE_INSECURE=1`                       |
+| Bearer-token gateway                                                    | `--header "Authorization: Bearer $TOKEN"` — repeatable, **not** cached, must be on every invocation |
+| Custom static header (e.g. `X-Tenant: foo`)                             | `--header "X-Tenant: foo"`                                                                          |
+| Endpoint behind Tailscale and `status` returns `Failed to reach remote` | `tailscale status` locally; the box is offline or the URL has the wrong hostname                    |
 
 Once `status` is green, every subsequent `chrome-devtools <tool> ... --remote "$URL"` call reuses the same server-side tab via a sticky session id cached at `~/.cache/chrome-devtools-mcp/remote/<hash>.session`.
 
