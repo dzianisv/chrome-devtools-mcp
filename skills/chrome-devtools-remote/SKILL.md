@@ -17,25 +17,45 @@ Trigger on any request that:
 
 If the user wants to drive a **local** browser, use the regular `chrome-devtools` CLI (without `--remote`) or the `mcp__chrome-devtools__*` MCP tools instead.
 
-## Preflight
+## Install (on the local box, once)
 
-Before any tool call, run a health check so you fail fast if the remote is unreachable:
+The `chrome-devtools` client CLI ships in the same npm package as the server. Install globally on the machine where the agent runs — **not** on the remote host:
 
 ```bash
-chrome-devtools status --remote "$CHROME_DEVTOOLS_MCP_REMOTE_URL"
+npm install -g @vibebrowser/chrome-devtools-mcp
+chrome-devtools --version   # should print 0.26.6 or newer
 ```
 
-A healthy response prints `status=ok http=200`. Anything else is a hard stop — surface the error to the user instead of retrying.
+You do not install anything on the remote host — that host is whoever already serves `https://.../mcp` and is set up out-of-band.
 
-If the URL is unset, ask the user once for the endpoint (e.g. `https://lab.tailnet.ts.net/mcp`). Set it for the rest of the session:
+Troubleshooting:
+
+- `command not found: chrome-devtools` — npm's global bin isn't on `PATH`. Add `$(npm config get prefix)/bin` to `PATH`, or on macOS Homebrew add `eval "$(brew shellenv)"` to your shell rc.
+- `Cannot find package 'pkce-challenge'` on first run — known bundling gap (issue dzianisv/chrome-devtools-mcp#17). Workaround: `cd "$(npm root -g)/@vibebrowser/chrome-devtools-mcp" && npm install pkce-challenge --no-save`.
+
+## Connect
+
+Configure the endpoint **once per shell session** and verify connectivity before doing anything else.
 
 ```bash
 export CHROME_DEVTOOLS_MCP_REMOTE_URL="https://lab.tailnet.ts.net/mcp"
+chrome-devtools status --remote "$CHROME_DEVTOOLS_MCP_REMOTE_URL"
 ```
 
-If the server uses a self-signed cert (common on tailnets without Tailscale-issued certs), pass `--insecure` or `export CHROME_DEVTOOLS_MCP_REMOTE_INSECURE=1`.
+A healthy response prints `status=ok http=200` plus a JSON body. Anything else is a hard stop — surface the error to the user instead of retrying.
 
-If the server is behind a bearer-token gateway, pass `--header "Authorization: Bearer $TOKEN"`. Headers are not cached — pass them on every invocation or wrap the CLI in a shell function.
+If the URL is unset, ask the user once for the endpoint. Conventional shape: `https://<host>/mcp` (the `/mcp` path is required — the bare host returns a 404).
+
+Connection-time flags:
+
+| Situation                                                               | What to pass                                                                                        |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Self-signed cert (common on tailnets without Tailscale-issued certs)    | `--insecure` on every call, or `export CHROME_DEVTOOLS_MCP_REMOTE_INSECURE=1`                       |
+| Bearer-token gateway                                                    | `--header "Authorization: Bearer $TOKEN"` — repeatable, **not** cached, must be on every invocation |
+| Custom static header (e.g. `X-Tenant: foo`)                             | `--header "X-Tenant: foo"`                                                                          |
+| Endpoint behind Tailscale and `status` returns `Failed to reach remote` | `tailscale status` locally; the box is offline or the URL has the wrong hostname                    |
+
+Once `status` is green, every subsequent `chrome-devtools <tool> ... --remote "$URL"` call reuses the same server-side tab via a sticky session id cached at `~/.cache/chrome-devtools-mcp/remote/<hash>.session`.
 
 ## Session model — read this before chaining commands
 
