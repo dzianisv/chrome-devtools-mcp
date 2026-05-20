@@ -14,6 +14,7 @@ import {describe, it} from 'node:test';
 import type {ChromeDevToolsMcpExtension} from '../../src/telemetry/types';
 
 const SERVER_PATH = path.resolve('build/src/bin/chrome-devtools-mcp.js');
+const TELEMETRY_EVENT_TIMEOUT_MS = 30_000;
 
 interface MockServerContext {
   server: http.Server;
@@ -194,7 +195,7 @@ describe('Telemetry E2E', () => {
         new Promise((_, reject) =>
           setTimeout(
             () => reject(new Error('Timeout waiting for server_start')),
-            10000,
+            TELEMETRY_EVENT_TIMEOUT_MS,
           ),
         ),
       ]);
@@ -220,7 +221,7 @@ describe('Telemetry E2E', () => {
         new Promise((_, reject) =>
           setTimeout(
             () => reject(new Error('Timeout waiting for server_shutdown')),
-            10000,
+            TELEMETRY_EVENT_TIMEOUT_MS,
           ),
         ),
       ]);

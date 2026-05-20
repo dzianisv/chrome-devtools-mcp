@@ -20,6 +20,10 @@ import {puppeteer} from './third_party/index.js';
 
 let browser: Browser | undefined;
 
+export function isBrowserConnected(): boolean {
+  return browser?.connected ?? false;
+}
+
 function makeTargetFilter(enableExtensions = false) {
   const ignoredPrefixes = new Set(['chrome://', 'chrome-untrusted://']);
   if (!enableExtensions) {
