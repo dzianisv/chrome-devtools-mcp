@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vibebrowser.chrome-devtools-mcp</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/engineer/bin/chrome-devtools-mcp-wrapper.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/engineer/Library/Logs/chrome-devtools-mcp/chrome-devtools-mcp.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/engineer/Library/Logs/chrome-devtools-mcp/chrome-devtools-mcp.stderr.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    <key>CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS</key>
+    <string>1</string>
+    <key>CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS</key>
+    <string>1</string>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+</dict>
+</plist>
