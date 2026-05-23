@@ -7,7 +7,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>{{NODE_PATH}}</string>
-    <string>--max-old-space-size=4096</string>
+    <string>--max-old-space-size=512</string>
     <string>{{BIN_PATH}}</string>
     <string>--autoConnect</string>
     <string>--experimentalPageIdRouting</string>
