@@ -6,8 +6,10 @@
   <string>com.vibebrowser.chrome-devtools-mcp</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
-    <string>/Users/engineer/bin/chrome-devtools-mcp-wrapper.sh</string>
+    <string>/opt/homebrew/bin/chrome-devtools-mcp</string>
+    <string>--autoConnect</string>
+    <string>--port</string>
+    <string>9333</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -27,6 +29,6 @@
     <string>1</string>
   </dict>
   <key>ThrottleInterval</key>
-  <integer>5</integer>
+  <integer>10</integer>
 </dict>
 </plist>
