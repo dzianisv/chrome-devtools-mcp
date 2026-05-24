@@ -41,16 +41,16 @@ kill_chrome() {
 }
 
 launch_chrome() {
-    # --remote-debugging-port=9222 enables CDP and writes DevToolsActivePort (read
-    # by --autoConnect). Chrome 148+ skips the trust dialog for debugger ports set
-    # via command line (explicit developer opt-in), unlike ports enabled via the
-    # chrome://inspect/#remote-debugging UI toggle which requires user approval.
     # --remote-allow-origins=* lets the MCP server's WebSocket handshake pass
     # Chrome's origin check.
     # --disable-features=DevToolsNewPermissionDialog suppresses the InfoBar dialog
     # on Chrome 130–147 as a belt-and-suspenders measure.
+    # NOTE: Do NOT add --remote-debugging-port here. Chrome 148 shows a blocking
+    # trust dialog BEFORE binding the port when that flag is used, preventing
+    # DevToolsActivePort from being written. Use chrome://inspect/#remote-debugging
+    # to enable remote debugging (approval stored as devtools.remote_debugging in
+    # Local State); Chrome then binds the port without a blocking dialog.
     open -a 'Google Chrome' --args \
-        --remote-debugging-port=9222 \
         --remote-allow-origins='*' \
         --disable-features=DevToolsNewPermissionDialog
 }
@@ -63,7 +63,6 @@ chrome_needs_restart() {
     local args
     args=$(ps -p "$pid" -o args= 2>/dev/null)
     echo "$args" | grep -q 'remote-allow-origins' || return 0
-    echo "$args" | grep -q 'remote-debugging-port' || return 0
     return 1
 }
 
@@ -179,12 +178,25 @@ APPLESCRIPT
     # Chrome's window bounds are readable via the app dictionary without
     # Accessibility. InfoBar sits ~100px below window top; "Allow" button is
     # ~80px from the right edge of the window.
+    # Use background+kill pattern: Chrome may not respond to AppleEvents when
+    # a trust dialog is pending, causing a foreground call to block indefinitely.
     if command -v /opt/homebrew/bin/cliclick >/dev/null 2>&1; then
-        local bounds
-        bounds=$(osascript 2>/dev/null \
+        local bounds_file
+        bounds_file=$(mktemp)
+        osascript 2>/dev/null \
             -e 'tell application "Google Chrome"' \
             -e 'if (count of windows) > 0 then return bounds of front window' \
-            -e 'end tell')
+            -e 'end tell' > "$bounds_file" &
+        local bpid=$!
+        local bwaited=0
+        while (( bwaited < 10 )); do
+            sleep 1; (( bwaited++ ))
+            kill -0 "$bpid" 2>/dev/null || break
+        done
+        kill "$bpid" 2>/dev/null; wait "$bpid" 2>/dev/null
+        local bounds
+        bounds=$(cat "$bounds_file" 2>/dev/null)
+        rm -f "$bounds_file"
         if [ -n "$bounds" ]; then
             local left top right
             left=$(echo "$bounds" | awk -F',' '{gsub(/ /,"",$1); print $1}')
@@ -298,8 +310,7 @@ while true; do
         if check_health; then
             log "Health check OK"
         else
-            log "Health check FAILED — restarting Chrome + MCP"
-            restart_chrome
+            log "Health check FAILED — restarting MCP (Chrome left running)"
             restart_mcp
             sleep 3
             click_trust_dialog_with_retry 3
