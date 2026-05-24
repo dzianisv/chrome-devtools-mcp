@@ -41,32 +41,35 @@ kill_chrome() {
 }
 
 launch_chrome() {
+    # --remote-debugging-port=9222 enables CDP and writes DevToolsActivePort (read
+    # by --autoConnect). Chrome 148+ skips the trust dialog for debugger ports set
+    # via command line (explicit developer opt-in), unlike ports enabled via the
+    # chrome://inspect/#remote-debugging UI toggle which requires user approval.
     # --remote-allow-origins=* lets the MCP server's WebSocket handshake pass
-    # Chrome's origin check. Remote debugging must already be enabled once via
-    # chrome://inspect/#remote-debugging for --autoConnect to write DevToolsActivePort.
-    # --disable-features=DevToolsNewPermissionDialog suppresses the trust dialog on
-    # Chrome versions that support this flag (Chrome 130–147). On Chrome 148+ the
-    # dialog is handled by click_trust_dialog() via AppleScript.
+    # Chrome's origin check.
+    # --disable-features=DevToolsNewPermissionDialog suppresses the InfoBar dialog
+    # on Chrome 130–147 as a belt-and-suspenders measure.
     open -a 'Google Chrome' --args \
+        --remote-debugging-port=9222 \
         --remote-allow-origins='*' \
         --disable-features=DevToolsNewPermissionDialog
 }
 
 chrome_needs_restart() {
     # Returns 0 (true) if Chrome is running without our required flags.
-    # Detecting missing --remote-allow-origins is sufficient — that flag is only
-    # set when Chrome was launched by this wrapper.
     local pid
     pid=$(pgrep -f 'MacOS/Google Chrome' | head -1)
     [ -z "$pid" ] && return 1  # Chrome not running; no restart needed here
-    ps -p "$pid" -o args= 2>/dev/null | grep -q 'remote-allow-origins' || return 0
+    local args
+    args=$(ps -p "$pid" -o args= 2>/dev/null)
+    echo "$args" | grep -q 'remote-allow-origins' || return 0
+    echo "$args" | grep -q 'remote-debugging-port' || return 0
     return 1
 }
 
 wait_for_chrome() {
-    # --autoConnect reads DevToolsActivePort written by Chrome when remote
-    # debugging is enabled via the chrome://inspect/#remote-debugging UI.
-    # /json/version (port 9222) is NOT used by --autoConnect; 404 is expected.
+    # --autoConnect reads DevToolsActivePort written by Chrome on startup when
+    # --remote-debugging-port is set. Wait for it to appear before starting MCP.
     local DEVTOOLS_PORT="$HOME/Library/Application Support/Google/Chrome/DevToolsActivePort"
     log "Waiting for Chrome DevToolsActivePort..."
     local i=0
@@ -85,8 +88,22 @@ wait_for_chrome() {
 ensure_chrome_window() {
     # The trust dialog InfoBar only appears in a Chrome browser window.
     # Open about:blank if Chrome has no windows.
+    # Use background+kill pattern to bound the osascript call — Chrome may
+    # not respond to AppleEvents when the trust dialog is pending, causing
+    # a foreground osascript call to block for ~2 minutes (default -1712 timeout).
+    local tmpfile
+    tmpfile=$(mktemp)
+    osascript 2>/dev/null -e 'tell application "Google Chrome" to return count of windows' > "$tmpfile" &
+    local ospid=$!
+    local waited=0
+    while (( waited < 10 )); do
+        sleep 1; (( waited++ ))
+        kill -0 "$ospid" 2>/dev/null || break
+    done
+    kill "$ospid" 2>/dev/null; wait "$ospid" 2>/dev/null
     local count
-    count=$(osascript 2>/dev/null -e 'tell application "Google Chrome" to return count of windows')
+    count=$(cat "$tmpfile" 2>/dev/null)
+    rm -f "$tmpfile"
     if [ "${count:-0}" -eq 0 ] 2>/dev/null; then
         log "Chrome has no windows; opening one so trust dialog can appear"
         open -a 'Google Chrome' 'about:blank'
@@ -182,6 +199,7 @@ APPLESCRIPT
     fi
 
     log "Trust dialog: ${result:-no_method_succeeded} (AppleScript timed out; cliclick unavailable or no window)"
+    return 1
 }
 
 click_trust_dialog_with_retry() {
@@ -219,17 +237,36 @@ check_health() {
       -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"watchdog","version":"1"}}}' \
       --max-time $TIMEOUT 2>/dev/null | grep -i 'mcp-session-id' | tr -d '\r' | awk '{print $2}')
     [ -z "$SID" ] && return 1
-    RESULT=$(curl -s -w '\nHTTP_STATUS:%{http_code}' -X POST "$MCP_URL" \
+    # Write SSE response to a temp file; kill curl after TIMEOUT if body never arrives.
+    # list_pages hangs forever when Chrome CDP is frozen (trust dialog holding WebSocket).
+    # curl -w outputs HTTP_STATUS even on timeout, so checking HTTP_STATUS:2 alone is a
+    # false positive — we must also verify that actual SSE data (a "data:" line) arrived.
+    local tmpfile
+    tmpfile=$(mktemp)
+    curl -s --no-buffer -X POST "$MCP_URL" \
       -H 'Content-Type: application/json' \
       -H 'Accept: application/json, text/event-stream' \
       -H "mcp-session-id: $SID" \
       -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_pages","arguments":{}}}' \
-      --max-time $TIMEOUT 2>/dev/null)
-    # Fail if: curl timed out (empty body), error in response, or non-200 status
-    [ -z "$RESULT" ] && return 1
-    echo "$RESULT" | grep -q 'HTTP_STATUS:2' || return 1
-    echo "$RESULT" | grep -q 'isError.*true\|timed out' && return 1
-    return 0
+      --max-time $TIMEOUT 2>/dev/null > "$tmpfile" &
+    local cpid=$!
+    local waited=0
+    # Poll until we see a "data:" SSE line or timeout
+    while (( waited < TIMEOUT )); do
+        sleep 1; (( waited++ ))
+        if grep -q '^data:' "$tmpfile" 2>/dev/null; then
+            kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null
+            local body
+            body=$(cat "$tmpfile")
+            rm -f "$tmpfile"
+            echo "$body" | grep -q 'isError.*true\|timed out' && return 1
+            return 0
+        fi
+        kill -0 "$cpid" 2>/dev/null || break
+    done
+    kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null
+    rm -f "$tmpfile"
+    return 1  # no SSE data arrived — CDP is frozen
 }
 
 trap 'log "Shutting down"; kill $MCP_PID 2>/dev/null; exit 0' TERM INT
