@@ -23,11 +23,12 @@ MCP_URL=http://localhost:9333/mcp
 CHECK_INTERVAL=300  # seconds between health checks
 TIMEOUT=15          # curl timeout per request
 MCP_PID=
+MCP_RSS_LIMIT_KB=$(( 1536 * 1024 ))  # 1.5 GB — restart before OOM at 2 GB heap limit
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [watchdog] $*"; }
 
 start_mcp() {
-    $NODE --max-old-space-size=512 $MCP_JS --autoConnect --experimentalPageIdRouting --port 9333 &
+    $NODE --max-old-space-size=2048 $MCP_JS --autoConnect --experimentalPageIdRouting --port 9333 &
     MCP_PID=$!
     log "Started MCP PID=$MCP_PID"
     sleep 5
@@ -304,6 +305,15 @@ while true; do
         start_mcp
         sleep 3
         click_trust_dialog_with_retry 3
+    else
+        # Proactive restart when RSS approaches the heap limit to avoid mid-session OOM crash.
+        local_rss=$(ps -p "$MCP_PID" -o rss= 2>/dev/null | tr -d ' ')
+        if [[ -n "$local_rss" ]] && (( local_rss > MCP_RSS_LIMIT_KB )); then
+            log "MCP RSS ${local_rss}KB exceeds limit ${MCP_RSS_LIMIT_KB}KB — proactive restart"
+            restart_mcp
+            sleep 3
+            click_trust_dialog_with_retry 3
+        fi
     fi
 
     if (( SECONDS - LAST_CHECK >= CHECK_INTERVAL )); then
