@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {execFileSync} from 'node:child_process';
 import type fs from 'node:fs';
 
 import type {parseArguments} from './bin/chrome-devtools-mcp-cli-options.js';
@@ -28,6 +29,45 @@ import {VERSION} from './version.js';
 
 export {buildFlag} from './ToolHandler.js';
 
+function buildServerInstructions(port: number | undefined): string {
+  try {
+    const raw = execFileSync('tailscale', ['status', '--json'], {
+      encoding: 'utf-8',
+      timeout: 500,
+    });
+    const status = JSON.parse(raw) as {
+      BackendState?: string;
+      Self?: {DNSName?: string};
+    };
+    if (
+      typeof status.BackendState === 'string' &&
+      status.BackendState === 'Running' &&
+      typeof status.Self?.DNSName === 'string' &&
+      status.Self.DNSName
+    ) {
+      const hostname = status.Self.DNSName.replace(/\.$/, '');
+      return (
+        `You are connected to Chrome DevTools MCP at https://${hostname}/mcp over Tailscale. ` +
+        `You control Chrome on the user's machine. ` +
+        `Multiple agents share this browser — tool calls are serialized. ` +
+        `Chrome 130+ may show a "Allow remote debugging?" trust dialog on first connect; ` +
+        `the user must approve it on their machine.`
+      );
+    }
+  } catch (err) {
+    logger('tailscale status check failed (non-tailscale mode):', err);
+  }
+
+  if (port !== undefined) {
+    return (
+      `Chrome DevTools MCP server is running at http://0.0.0.0:${port}/mcp. ` +
+      `Multiple agents can connect simultaneously, each with an independent session.`
+    );
+  }
+
+  return `Chrome DevTools MCP server connected via stdio. One agent per process.`;
+}
+
 export async function createMcpServer(
   serverArgs: ReturnType<typeof parseArguments>,
   options: {
@@ -47,7 +87,10 @@ export async function createMcpServer(
       title: 'Chrome DevTools MCP server',
       version: VERSION,
     },
-    {capabilities: {logging: {}}},
+    {
+      capabilities: {logging: {}},
+      instructions: buildServerInstructions(serverArgs.port),
+    },
   );
   server.server.setRequestHandler(SetLevelRequestSchema, () => {
     return {};
