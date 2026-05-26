@@ -22,6 +22,7 @@ import {
   clearStickySession,
   fetchRemoteHealth,
   getRemoteSessionFilePath,
+  isSessionNotFound,
   invokeRemoteTool,
   loadStickySessionId,
   parseHeaderFlag,
@@ -180,6 +181,45 @@ async function startFixtureServer(): Promise<FixtureServer> {
 }
 
 describe('remote-client helpers', () => {
+  describe('isSessionNotFound', () => {
+    it('matches HTTP 404 stale session errors', () => {
+      assert.strictEqual(isSessionNotFound({code: 404}), true);
+    });
+
+    it('matches JSON-RPC -32001 stale session errors', () => {
+      assert.strictEqual(isSessionNotFound({code: -32001}), true);
+      assert.strictEqual(
+        isSessionNotFound({
+          cause: {code: -32001, message: 'Session not found'},
+        }),
+        true,
+      );
+      assert.strictEqual(
+        isSessionNotFound({data: {code: -32001, message: 'Session not found'}}),
+        true,
+      );
+    });
+
+    it('matches message-only stale session errors', () => {
+      assert.strictEqual(
+        isSessionNotFound({message: 'MCP error -32001: Session not found'}),
+        true,
+      );
+      assert.strictEqual(
+        isSessionNotFound({cause: {message: 'Session not found'}}),
+        true,
+      );
+    });
+
+    it('does not classify unrelated errors as stale sessions', () => {
+      assert.strictEqual(isSessionNotFound(new Error('boom')), false);
+      assert.strictEqual(
+        isSessionNotFound({code: -32601, message: 'Method not found'}),
+        false,
+      );
+    });
+  });
+
   describe('parseHeaderFlag', () => {
     it('parses colon-separated headers', () => {
       assert.deepStrictEqual(parseHeaderFlag('Authorization: Bearer xyz'), [
@@ -377,6 +417,29 @@ describe('remote-client integration', () => {
     const fresh = loadStickySessionId(server.url);
     assert.ok(fresh);
     assert.notStrictEqual(fresh, 'does-not-exist');
+    assert.ok(server.sessions.has(fresh!));
+  });
+
+  it('recovers when stale session failure is surfaced as MCP code -32001', async () => {
+    await invokeRemoteTool({
+      url: server.url,
+      tool: 'echo',
+      args: {text: 'seed'},
+    });
+
+    for (const [, s] of server.sessions) {
+      await s.transport.close().catch(() => undefined);
+    }
+    server.sessions.clear();
+
+    await invokeRemoteTool({
+      url: server.url,
+      tool: 'echo',
+      args: {text: 'after-reset'},
+    });
+
+    const fresh = loadStickySessionId(server.url);
+    assert.ok(fresh, 'a fresh session should be persisted after recovery');
     assert.ok(server.sessions.has(fresh!));
   });
 

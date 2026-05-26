@@ -1,6 +1,7 @@
 # Skill: MacBook Remote — chrome-devtools-mcp Management
 
 ## Trigger phrases
+
 - "restart chrome-devtools"
 - "MCP not working on MacBook"
 - "browser control not working"
@@ -12,17 +13,18 @@
 
 MacBook Pro running `@vibebrowser/chrome-devtools-mcp` as a LaunchAgent.
 
-| Item | Value |
-|---|---|
-| Tailscale IP | `100.68.120.26` |
-| SSH user | `engineer` |
-| MCP HTTP endpoint | `http://100.68.120.26:9333/mcp` |
-| LaunchAgent plist | `~/Library/LaunchAgents/com.vibebrowser.chrome-devtools-mcp.plist` |
+| Item                | Value                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------- |
+| Tailscale IP        | `100.68.120.26`                                                                       |
+| SSH user            | `engineer`                                                                            |
+| MCP HTTP endpoint   | `http://100.68.120.26:9333/mcp`                                                       |
+| LaunchAgent plist   | `~/Library/LaunchAgents/com.vibebrowser.chrome-devtools-mcp.plist`                    |
 | Package (installed) | `/opt/homebrew/Cellar/node/24.7.0/lib/node_modules/@vibebrowser/chrome-devtools-mcp/` |
-| Stdout log | `~/Library/Logs/chrome-devtools-mcp/chrome-devtools-mcp.stdout.log` |
-| Stderr log | `~/Library/Logs/chrome-devtools-mcp/chrome-devtools-mcp.stderr.log` |
+| Stdout log          | `~/Library/Logs/chrome-devtools-mcp/chrome-devtools-mcp.stdout.log`                   |
+| Stderr log          | `~/Library/Logs/chrome-devtools-mcp/chrome-devtools-mcp.stderr.log`                   |
 
 **IMPORTANT — `--autoConnect` mode:**
+
 - Chrome remote debugging enabled via `chrome://inspect/#remote-debugging` (NOT `--remote-debugging-port`)
 - CDP port read dynamically from `~/Library/Application Support/Google/Chrome/DevToolsActivePort`
 - `/json/version` returns 404 — expected, not an error
@@ -38,6 +40,7 @@ ssh engineer@100.68.120.26 \
 ```
 
 Wait 10s, then verify:
+
 ```bash
 ssh engineer@100.68.120.26 \
   "ps aux | grep -v grep | grep chrome-devtools-mcp | awk '{print \"PID=\"\$2\" RSS=\"\$6\"KB\"}'"
@@ -82,15 +85,18 @@ Pages that never navigate (claude.ai, gmail, SPAs) accumulate every network/cons
 Unfixed in upstream v1.0.1.
 
 **Local patches applied** (2026-05-24):
+
 ```
 /opt/homebrew/Cellar/node/24.7.0/lib/node_modules/@vibebrowser/chrome-devtools-mcp/build/src/PageCollector.js
 ```
 
 **Patch 1 — cap array size** (reduces max item count):
+
 - Added `maxItemsPerNavigation = 200` class field
 - Added eviction: `if (navigations[0].length > this.maxItemsPerNavigation) navigations[0].shift();`
 
 **Patch 2 — slim NetworkCollector** (fixes root cause — drops ~335KB Puppeteer object per item to ~4KB plain object):
+
 - `NetworkCollector` collects on `requestfinished`/`requestfailed` instead of `request`
 - Eagerly extracts all fields (url, method, headers, response status, etc.) into plain JS object
 - Drops reference to full Puppeteer `HTTPRequest` (which held CDPSession + FrameManager chains)
@@ -99,6 +105,7 @@ Unfixed in upstream v1.0.1.
 - Backup at `PageCollector.js.bak`
 
 **Re-apply both patches after package update:**
+
 ```bash
 ssh engineer@100.68.120.26 'python3 << '"'"'PYEOF'"'"'
 PCJS = "/opt/homebrew/Cellar/node/24.7.0/lib/node_modules/@vibebrowser/chrome-devtools-mcp/build/src/PageCollector.js"
@@ -196,9 +203,9 @@ PYEOF
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| MCP restarts every few minutes | OOM crash (RSS > 2GB) | Check `maxItemsPerNavigation` patch is present |
-| `list_pages` hangs / health check fails | Chrome trust dialog pending | Restart LaunchAgent; manually click Allow in Chrome trust dialog |
-| MCP not reachable after Chrome restart | Chrome launched without `--remote-allow-origins=*` | Restart Chrome with `--remote-allow-origins=*` flag |
-| Trust dialog not auto-dismissed | Wrapper removed (caused profile incident) | Manually click Allow in Chrome trust dialog when prompted |
+| Symptom                                 | Likely cause                                       | Fix                                                              |
+| --------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------- |
+| MCP restarts every few minutes          | OOM crash (RSS > 2GB)                              | Check `maxItemsPerNavigation` patch is present                   |
+| `list_pages` hangs / health check fails | Chrome trust dialog pending                        | Restart LaunchAgent; manually click Allow in Chrome trust dialog |
+| MCP not reachable after Chrome restart  | Chrome launched without `--remote-allow-origins=*` | Restart Chrome with `--remote-allow-origins=*` flag              |
+| Trust dialog not auto-dismissed         | Wrapper removed (caused profile incident)          | Manually click Allow in Chrome trust dialog when prompted        |

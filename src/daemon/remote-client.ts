@@ -142,12 +142,54 @@ async function disconnect(
  * surfaces as a 404 on the first real call. Detect that and re-run with a
  * fresh initialize.
  */
-function isSessionNotFound(err: unknown): boolean {
+export function isSessionNotFound(err: unknown): boolean {
   if (!err || typeof err !== 'object') {
     return false;
   }
-  const code = (err as {code?: unknown}).code;
-  return code === 404;
+
+  const asObject = (value: unknown): object | undefined => {
+    if (!value || typeof value !== 'object') {
+      return undefined;
+    }
+    return value;
+  };
+  const readField = (value: unknown, field: string): unknown => {
+    const obj = asObject(value);
+    if (!obj || !(field in obj)) {
+      return undefined;
+    }
+    return Reflect.get(obj, field);
+  };
+
+  const topCode = readField(err, 'code');
+  const causeCode = readField(readField(err, 'cause'), 'code');
+  const dataCode = readField(readField(err, 'data'), 'code');
+  if (topCode === 404 || topCode === -32001) {
+    return true;
+  }
+  if (causeCode === 404 || causeCode === -32001) {
+    return true;
+  }
+  if (dataCode === -32001) {
+    return true;
+  }
+
+  const topMessageValue = readField(err, 'message');
+  const topMessage =
+    typeof topMessageValue === 'string' ? topMessageValue.toLowerCase() : '';
+  const causeMessageValue = readField(readField(err, 'cause'), 'message');
+  const causeMessage =
+    typeof causeMessageValue === 'string'
+      ? causeMessageValue.toLowerCase()
+      : '';
+  const dataMessageValue = readField(readField(err, 'data'), 'message');
+  const dataMessage =
+    typeof dataMessageValue === 'string' ? dataMessageValue.toLowerCase() : '';
+  return (
+    topMessage.includes('session not found') ||
+    causeMessage.includes('session not found') ||
+    dataMessage.includes('session not found')
+  );
 }
 
 async function callOnce(
