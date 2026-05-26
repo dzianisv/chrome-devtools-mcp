@@ -179,7 +179,9 @@ export function isSessionNotFound(err: unknown): boolean {
     typeof topMessageValue === 'string' ? topMessageValue.toLowerCase() : '';
   const causeMessageValue = readField(readField(err, 'cause'), 'message');
   const causeMessage =
-    typeof causeMessageValue === 'string' ? causeMessageValue.toLowerCase() : '';
+    typeof causeMessageValue === 'string'
+      ? causeMessageValue.toLowerCase()
+      : '';
   const dataMessageValue = readField(readField(err, 'data'), 'message');
   const dataMessage =
     typeof dataMessageValue === 'string' ? dataMessageValue.toLowerCase() : '';

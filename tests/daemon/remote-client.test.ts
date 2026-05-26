@@ -189,7 +189,9 @@ describe('remote-client helpers', () => {
     it('matches JSON-RPC -32001 stale session errors', () => {
       assert.strictEqual(isSessionNotFound({code: -32001}), true);
       assert.strictEqual(
-        isSessionNotFound({cause: {code: -32001, message: 'Session not found'}}),
+        isSessionNotFound({
+          cause: {code: -32001, message: 'Session not found'},
+        }),
         true,
       );
       assert.strictEqual(
