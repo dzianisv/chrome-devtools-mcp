@@ -385,14 +385,54 @@ if (args.port) {
     }
   });
 
-  httpServer.listen(args.port, () => {
-    logger(
-      `Chrome DevTools MCP Server listening on http://localhost:${args.port}/mcp`,
-    );
-    console.error(
-      `Chrome DevTools MCP Server listening on http://localhost:${args.port}/mcp`,
-    );
-  });
+  async function listenWithRetry(port: number): Promise<void> {
+    const maxRetries = 4;
+    const backoffMs = [1000, 2000, 4000, 8000];
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const error = await new Promise<NodeJS.ErrnoException | null>(
+        (resolve) => {
+          function onError(err: NodeJS.ErrnoException): void {
+            httpServer.removeListener('error', onError);
+            resolve(err);
+          }
+          httpServer.once('error', onError);
+          httpServer.listen(port, () => {
+            httpServer.removeListener('error', onError);
+            resolve(null);
+          });
+        },
+      );
+
+      if (error === null) {
+        logger(
+          `Chrome DevTools MCP Server listening on http://localhost:${port}/mcp`,
+        );
+        console.error(
+          `Chrome DevTools MCP Server listening on http://localhost:${port}/mcp`,
+        );
+        return;
+      }
+
+      if (error.code !== 'EADDRINUSE' || attempt === maxRetries) {
+        console.error(
+          `Chrome DevTools MCP Server failed to listen on port ${port}: ${error.message}`,
+        );
+        process.exit(1);
+      }
+
+      const delayMs = backoffMs[attempt] ?? 8000;
+      console.error(
+        `Port ${port} in use (EADDRINUSE), retrying in ${delayMs}ms... (attempt ${attempt + 1}/${maxRetries})`,
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+
+      // Close the server so it can attempt to listen again
+      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    }
+  }
+
+  await listenWithRetry(args.port);
 } else {
   // Stdio mode is inherently single-session: one client, one McpServer.
   const {server} = await createMcpServer(args, {logFile});
