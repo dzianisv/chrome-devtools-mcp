@@ -390,19 +390,17 @@ if (args.port) {
     const backoffMs = [1000, 2000, 4000, 8000];
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const error = await new Promise<NodeJS.ErrnoException | null>(
-        (resolve) => {
-          function onError(err: NodeJS.ErrnoException): void {
-            httpServer.removeListener('error', onError);
-            resolve(err);
-          }
-          httpServer.once('error', onError);
-          httpServer.listen(port, () => {
-            httpServer.removeListener('error', onError);
-            resolve(null);
-          });
-        },
-      );
+      const error = await new Promise<NodeJS.ErrnoException | null>(resolve => {
+        function onError(err: NodeJS.ErrnoException): void {
+          httpServer.removeListener('error', onError);
+          resolve(err);
+        }
+        httpServer.once('error', onError);
+        httpServer.listen(port, () => {
+          httpServer.removeListener('error', onError);
+          resolve(null);
+        });
+      });
 
       if (error === null) {
         logger(
@@ -425,10 +423,10 @@ if (args.port) {
       console.error(
         `Port ${port} in use (EADDRINUSE), retrying in ${delayMs}ms... (attempt ${attempt + 1}/${maxRetries})`,
       );
-      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      await new Promise<void>(resolve => setTimeout(resolve, delayMs));
 
       // Close the server so it can attempt to listen again
-      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      await new Promise<void>(resolve => httpServer.close(() => resolve()));
     }
   }
 
