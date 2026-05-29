@@ -19,6 +19,38 @@ import type {
 import {puppeteer} from './third_party/index.js';
 
 let browser: Browser | undefined;
+let pendingConnection: Promise<Browser> | undefined;
+
+/**
+ * Coalesce concurrent first-connects onto a single in-flight attempt.
+ *
+ * The HTTP transport serves many agents from one process and each session
+ * independently calls ensureBrowserConnected/ensureBrowserLaunched. Without
+ * this guard, two sessions that initialize at the same time both observe
+ * `browser` as unset (the check-then-connect is not atomic across the `await`)
+ * and each opens its own CDP connection. That breaks the shared-browser model
+ * the fork exists to provide and triggers a separate Chrome "Allow remote
+ * debugging?" trust prompt per connection. Memoizing the in-flight promise
+ * ensures all concurrent callers await the same single connection.
+ */
+async function acquireBrowser(
+  connect: () => Promise<Browser>,
+): Promise<Browser> {
+  if (browser?.connected) {
+    return browser;
+  }
+  if (!pendingConnection) {
+    pendingConnection = (async () => {
+      try {
+        browser = await connect();
+        return browser;
+      } finally {
+        pendingConnection = undefined;
+      }
+    })();
+  }
+  return pendingConnection;
+}
 
 function makeTargetFilter(enableExtensions = false) {
   const ignoredPrefixes = new Set(['chrome://', 'chrome-untrusted://']);
@@ -53,84 +85,85 @@ export async function ensureBrowserConnected(options: {
   enableExtensions?: boolean;
 }) {
   const {channel, enableExtensions} = options;
-  if (browser?.connected) {
-    return browser;
-  }
+  return acquireBrowser(async () => {
+    const connectOptions: Parameters<typeof puppeteer.connect>[0] = {
+      targetFilter: makeTargetFilter(enableExtensions),
+      defaultViewport: null,
+      handleDevToolsAsPage: true,
+    };
 
-  const connectOptions: Parameters<typeof puppeteer.connect>[0] = {
-    targetFilter: makeTargetFilter(enableExtensions),
-    defaultViewport: null,
-    handleDevToolsAsPage: true,
-  };
-
-  let autoConnect = false;
-  if (options.wsEndpoint) {
-    connectOptions.browserWSEndpoint = options.wsEndpoint;
-    if (options.wsHeaders) {
-      connectOptions.headers = options.wsHeaders;
-    }
-  } else if (options.browserURL) {
-    connectOptions.browserURL = options.browserURL;
-  } else if (channel || options.userDataDir) {
-    const userDataDir = options.userDataDir;
-    if (userDataDir) {
-      autoConnect = true;
-      // TODO: re-expose this logic via Puppeteer.
-      const portPath = path.join(userDataDir, 'DevToolsActivePort');
-      try {
-        const fileContent = await fs.promises.readFile(portPath, 'utf8');
-        const [rawPort, rawPath] = fileContent
-          .split('\n')
-          .map(line => {
-            return line.trim();
-          })
-          .filter(line => {
-            return !!line;
-          });
-        if (!rawPort || !rawPath) {
-          throw new Error(`Invalid DevToolsActivePort '${fileContent}' found`);
+    let autoConnect = false;
+    if (options.wsEndpoint) {
+      connectOptions.browserWSEndpoint = options.wsEndpoint;
+      if (options.wsHeaders) {
+        connectOptions.headers = options.wsHeaders;
+      }
+    } else if (options.browserURL) {
+      connectOptions.browserURL = options.browserURL;
+    } else if (channel || options.userDataDir) {
+      const userDataDir = options.userDataDir;
+      if (userDataDir) {
+        autoConnect = true;
+        // TODO: re-expose this logic via Puppeteer.
+        const portPath = path.join(userDataDir, 'DevToolsActivePort');
+        try {
+          const fileContent = await fs.promises.readFile(portPath, 'utf8');
+          const [rawPort, rawPath] = fileContent
+            .split('\n')
+            .map(line => {
+              return line.trim();
+            })
+            .filter(line => {
+              return !!line;
+            });
+          if (!rawPort || !rawPath) {
+            throw new Error(
+              `Invalid DevToolsActivePort '${fileContent}' found`,
+            );
+          }
+          const port = parseInt(rawPort, 10);
+          if (isNaN(port) || port <= 0 || port > 65535) {
+            throw new Error(`Invalid port '${rawPort}' found`);
+          }
+          const browserWSEndpoint = `ws://127.0.0.1:${port}${rawPath}`;
+          connectOptions.browserWSEndpoint = browserWSEndpoint;
+        } catch (error) {
+          throw new Error(
+            `Could not connect to Chrome in ${userDataDir}. Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.`,
+            {
+              cause: error,
+            },
+          );
         }
-        const port = parseInt(rawPort, 10);
-        if (isNaN(port) || port <= 0 || port > 65535) {
-          throw new Error(`Invalid port '${rawPort}' found`);
+      } else {
+        if (!channel) {
+          throw new Error('Channel must be provided if userDataDir is missing');
         }
-        const browserWSEndpoint = `ws://127.0.0.1:${port}${rawPath}`;
-        connectOptions.browserWSEndpoint = browserWSEndpoint;
-      } catch (error) {
-        throw new Error(
-          `Could not connect to Chrome in ${userDataDir}. Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.`,
-          {
-            cause: error,
-          },
-        );
+        connectOptions.channel = (
+          channel === 'stable' ? 'chrome' : `chrome-${channel}`
+        ) as ChromeReleaseChannel;
       }
     } else {
-      if (!channel) {
-        throw new Error('Channel must be provided if userDataDir is missing');
-      }
-      connectOptions.channel = (
-        channel === 'stable' ? 'chrome' : `chrome-${channel}`
-      ) as ChromeReleaseChannel;
+      throw new Error(
+        'Either browserURL, wsEndpoint, channel or userDataDir must be provided',
+      );
     }
-  } else {
-    throw new Error(
-      'Either browserURL, wsEndpoint, channel or userDataDir must be provided',
-    );
-  }
 
-  logger('Connecting Puppeteer to ', JSON.stringify(connectOptions));
-  try {
-    browser = await puppeteer.connect(connectOptions);
-  } catch (err) {
-    throw new Error(
-      `Could not connect to Chrome. ${autoConnect ? `Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.` : `Check if Chrome is running.`}`,
-      {
-        cause: err,
-      },
-    );
-  }
-  logger('Connected Puppeteer');
-  return browser;
+    logger('Connecting Puppeteer to ', JSON.stringify(connectOptions));
+    let connected: Browser;
+    try {
+      connected = await puppeteer.connect(connectOptions);
+    } catch (err) {
+      throw new Error(
+        `Could not connect to Chrome. ${autoConnect ? `Check if Chrome is running and remote debugging is enabled by going to chrome://inspect/#remote-debugging.` : `Check if Chrome is running.`}`,
+        {
+          cause: err,
+        },
+      );
+    }
+    logger('Connected Puppeteer');
+    return connected;
+  });
 }
 
 interface McpLaunchOptions {
@@ -263,11 +296,7 @@ export async function launch(options: McpLaunchOptions): Promise<Browser> {
 export async function ensureBrowserLaunched(
   options: McpLaunchOptions,
 ): Promise<Browser> {
-  if (browser?.connected) {
-    return browser;
-  }
-  browser = await launch(options);
-  return browser;
+  return acquireBrowser(() => launch(options));
 }
 
 export type Channel = 'stable' | 'canary' | 'beta' | 'dev';
