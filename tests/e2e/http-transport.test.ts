@@ -6,29 +6,11 @@
 
 import assert from 'node:assert';
 import {type ChildProcess, spawn} from 'node:child_process';
-import * as net from 'node:net';
 import {after, before, describe, it} from 'node:test';
 
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {executablePath} from 'puppeteer';
-
-/** Find a free TCP port by binding to :0 and reading the assigned port. */
-async function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.listen(0, () => {
-      const addr = srv.address();
-      srv.close(() => {
-        if (addr !== null && typeof addr === 'object') {
-          resolve(addr.port);
-        } else {
-          reject(new Error('Could not determine free port'));
-        }
-      });
-    });
-  });
-}
 
 interface HealthResponse {
   status: string;
@@ -79,10 +61,6 @@ interface TestServer {
 async function spawnServer(
   extraEnv: Record<string, string> = {},
 ): Promise<TestServer> {
-  const port = await getFreePort();
-  const mcpUrl = `http://127.0.0.1:${port}/mcp`;
-  const healthUrl = `http://127.0.0.1:${port}/health`;
-
   const proc: ChildProcess = spawn(
     'node',
     [
@@ -92,7 +70,7 @@ async function spawnServer(
       '--executable-path',
       executablePath(),
       '--port',
-      String(port),
+      '0',
     ],
     {
       env: {
@@ -106,9 +84,6 @@ async function spawnServer(
   );
 
   let stderr = '';
-  proc.stderr?.on('data', chunk => {
-    stderr += String(chunk);
-  });
   proc.on('error', err => {
     console.error('Server process error:', err);
   });
@@ -124,7 +99,36 @@ async function spawnServer(
     });
   }
 
-  const deadline = Date.now() + 15000;
+  // Parse the actual bound port from the server's stderr output.
+  // The server prints: "Chrome DevTools MCP Server listening on http://localhost:<port>/mcp"
+  const port = await new Promise<number>((resolve, reject) => {
+    const deadline = setTimeout(() => {
+      console.error('Server stderr so far:', stderr);
+      reject(new Error('Server did not start within 15000ms'));
+    }, 15000);
+
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      stderr += String(chunk);
+      const match = /listening on http:\/\/localhost:(\d+)\/mcp/.exec(stderr);
+      if (match !== null) {
+        clearTimeout(deadline);
+        resolve(Number(match[1]));
+      }
+    });
+
+    proc.on('exit', code => {
+      clearTimeout(deadline);
+      reject(
+        new Error(`Server exited with code ${String(code)} before starting`),
+      );
+    });
+  });
+
+  const mcpUrl = `http://127.0.0.1:${port}/mcp`;
+  const healthUrl = `http://127.0.0.1:${port}/health`;
+
+  // Confirm the health endpoint is reachable now that we know the real port.
+  const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(healthUrl);
@@ -134,11 +138,11 @@ async function spawnServer(
     } catch {
       // Server not ready yet
     }
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise(r => setTimeout(r, 100));
   }
   console.error('Server stderr:', stderr);
   await stop();
-  throw new Error('Server did not start within 15000ms');
+  throw new Error('Server health endpoint not reachable after start message');
 }
 
 function createClient(): Client {

@@ -56,7 +56,7 @@ if (process.env['CHROME_DEVTOOLS_MCP_CRASH_ON_UNCAUGHT'] !== 'true') {
 
 logger(`Starting Chrome DevTools MCP Server v${VERSION}`);
 
-if (args.port) {
+if (args.port !== undefined) {
   // Each MCP session owns its own McpServer + McpContext but shares one
   // browser. `dispose` releases that session's collectors/listeners when it
   // disconnects. Holding multiple entries concurrently is expected — a new
@@ -403,11 +403,14 @@ if (args.port) {
       });
 
       if (error === null) {
+        const addr = httpServer.address();
+        const boundPort =
+          addr !== null && typeof addr === 'object' ? addr.port : port;
         logger(
-          `Chrome DevTools MCP Server listening on http://localhost:${port}/mcp`,
+          `Chrome DevTools MCP Server listening on http://localhost:${boundPort}/mcp`,
         );
         console.error(
-          `Chrome DevTools MCP Server listening on http://localhost:${port}/mcp`,
+          `Chrome DevTools MCP Server listening on http://localhost:${boundPort}/mcp`,
         );
         return;
       }
