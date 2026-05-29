@@ -1,5 +1,26 @@
 This repository contains an MCP server and CLI for Chrome DevTools.
 
+# Core invariant (this fork's reason to exist)
+
+This is a **multi-agent fork**: many agents connect over HTTP to one server
+process and **share a single browser over a single CDP connection**. This is the
+product, not an implementation detail. Concretely:
+
+- The server keeps **one** CDP connection (`browser` singleton in
+  `src/browser.ts`). It must NOT open a new connection per client/session.
+- Every extra CDP connection makes Chrome show a separate "Allow remote
+  debugging?" trust prompt and breaks sharing — that is the exact failure this
+  fork was built to prevent.
+- Connection acquisition must be safe under **concurrent** first-connects (two
+  agents initializing at the same moment). A check-then-connect across an
+  `await` is a race; coalesce onto one in-flight promise (see `acquireBrowser`).
+- If you touch `src/browser.ts`, `src/index.ts` `getContext`, or session
+  lifecycle code, you MUST keep `tests/browser.test.ts` green — especially
+  "shares a single connection across concurrent connects", which fires
+  concurrent connects and asserts one shared `Browser`. Do not weaken or delete
+  it. A change that makes concurrent agents open multiple connections is a
+  release-blocking regression, even if every other test passes.
+
 # Instructions
 
 - Use only scripts from `package.json` to run commands.
