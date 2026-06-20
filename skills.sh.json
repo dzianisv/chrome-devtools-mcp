@@ -1,0 +1,25 @@
+{
+  "$schema": "https://skills.sh/schemas/skills.sh.schema.json",
+  "notGrouped": "bottom",
+  "groupings": [
+    {
+      "title": "Browser Automation",
+      "description": "Skills for driving Chrome browsers locally and remotely using the chrome-devtools CLI.",
+      "skills": [
+        "chrome-devtools",
+        "chrome-devtools-cli",
+        "chrome-devtools-remote"
+      ]
+    },
+    {
+      "title": "Debugging & Performance",
+      "description": "Skills for diagnosing browser issues, memory leaks, and optimizing page performance.",
+      "skills": [
+        "a11y-debugging",
+        "debug-optimize-lcp",
+        "memory-leak-debugging",
+        "troubleshooting"
+      ]
+    }
+  ]
+}

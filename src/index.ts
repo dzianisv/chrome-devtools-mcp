@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {execFileSync} from 'node:child_process';
 import type fs from 'node:fs';
 
 import type {parseArguments} from './bin/chrome-devtools-mcp-cli-options.js';
@@ -14,7 +15,6 @@ import {logger} from './logger.js';
 import {McpContext} from './McpContext.js';
 import {Mutex} from './Mutex.js';
 import {ClearcutLogger} from './telemetry/ClearcutLogger.js';
-import {FilePersistence} from './telemetry/persistence.js';
 import {
   McpServer,
   type CallToolResult,
@@ -29,30 +29,68 @@ import {VERSION} from './version.js';
 
 export {buildFlag} from './ToolHandler.js';
 
+function buildServerInstructions(port: number | undefined): string {
+  try {
+    const raw = execFileSync('tailscale', ['status', '--json'], {
+      encoding: 'utf-8',
+      timeout: 500,
+    });
+    const status = JSON.parse(raw) as {
+      BackendState?: string;
+      Self?: {DNSName?: string};
+    };
+    if (
+      typeof status.BackendState === 'string' &&
+      status.BackendState === 'Running' &&
+      typeof status.Self?.DNSName === 'string' &&
+      status.Self.DNSName
+    ) {
+      const hostname = status.Self.DNSName.replace(/\.$/, '');
+      return (
+        `You are connected to Chrome DevTools MCP at https://${hostname}/mcp over Tailscale. ` +
+        `You control Chrome on the user's machine. ` +
+        `Multiple agents share this browser — tool calls are serialized. ` +
+        `Chrome 130+ may show a "Allow remote debugging?" trust dialog on first connect; ` +
+        `the user must approve it on their machine.`
+      );
+    }
+  } catch (err) {
+    logger('tailscale status check failed (non-tailscale mode):', err);
+  }
+
+  if (port !== undefined) {
+    return (
+      `Chrome DevTools MCP server is running at http://0.0.0.0:${port}/mcp. ` +
+      `Multiple agents can connect simultaneously, each with an independent session.`
+    );
+  }
+
+  return `Chrome DevTools MCP server connected via stdio. One agent per process.`;
+}
+
 export async function createMcpServer(
   serverArgs: ReturnType<typeof parseArguments>,
   options: {
     logFile?: fs.WriteStream;
+    /**
+     * Mutex serializing tool execution. When the HTTP server hosts multiple
+     * concurrent sessions they all share one browser, so a single mutex shared
+     * across every session keeps tool calls serialized. Omit it (stdio mode,
+     * single session) and a fresh per-server mutex is created.
+     */
+    toolMutex?: Mutex;
   },
 ) {
-  if (serverArgs.usageStatistics) {
-    ClearcutLogger.initialize({
-      persistence: new FilePersistence(),
-      logFile: serverArgs.logFile,
-      appVersion: VERSION,
-      clearcutEndpoint: serverArgs.clearcutEndpoint,
-      clearcutForceFlushIntervalMs: serverArgs.clearcutForceFlushIntervalMs,
-      clearcutIncludePidHeader: serverArgs.clearcutIncludePidHeader,
-    });
-  }
-
   const server = new McpServer(
     {
       name: 'chrome_devtools',
       title: 'Chrome DevTools MCP server',
       version: VERSION,
     },
-    {capabilities: {logging: {}}},
+    {
+      capabilities: {logging: {}},
+      instructions: buildServerInstructions(serverArgs.port),
+    },
   );
   server.server.setRequestHandler(SetLevelRequestSchema, () => {
     return {};
@@ -139,7 +177,7 @@ export async function createMcpServer(
     return context;
   }
 
-  const toolMutex = new Mutex();
+  const toolMutex = options.toolMutex ?? new Mutex();
 
   function registerTool(tool: ToolDefinition | DefinedPageTool): void {
     const toolHandler = new ToolHandler(
@@ -173,7 +211,14 @@ export async function createMcpServer(
 
   await loadIssueDescriptions();
 
-  return {server};
+  // Releases this session's resources (collectors, CDP listeners, page
+  // wrappers). Deliberately does not close the shared browser — McpContext
+  // leaves that to the process. Safe to call when a session disconnects.
+  function dispose(): void {
+    context?.dispose();
+  }
+
+  return {server, dispose};
 }
 
 export const logDisclaimers = (args: ReturnType<typeof parseArguments>) => {

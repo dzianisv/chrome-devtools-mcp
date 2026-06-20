@@ -1,0 +1,77 @@
+name: Validate skills
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'skills/**/SKILL.md'
+      - '.github/workflows/validate-skills.yml'
+  pull_request:
+    paths:
+      - 'skills/**/SKILL.md'
+      - '.github/workflows/validate-skills.yml'
+
+permissions: read-all
+
+jobs:
+  validate:
+    name: Validate SKILL.md frontmatter
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+
+      # skills.sh discovers any GitHub repo containing SKILL.md files — no
+      # explicit publish step. This job's only job is to keep the
+      # SKILL.md frontmatter well-formed so the indexer doesn't reject it
+      # (and so a typo in `name:` or `description:` never reaches main).
+      - name: Validate each SKILL.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          found=0
+          for skill in skills/**/SKILL.md; do
+            found=1
+            echo "::group::$skill"
+            node --input-type=module --eval "
+              import fs from 'node:fs';
+              const path = process.argv[1];
+              const content = fs.readFileSync(path, 'utf8');
+              const m = content.match(/^---\n([\s\S]*?)\n---\n/);
+              if (!m) {
+                console.error('Missing YAML frontmatter');
+                process.exit(1);
+              }
+              const fm = Object.fromEntries(
+                m[1]
+                  .split(/\r?\n/)
+                  .filter(l => l.includes(':'))
+                  .map(l => {
+                    const i = l.indexOf(':');
+                    return [l.slice(0, i).trim(), l.slice(i + 1).trim()];
+                  }),
+              );
+              const errors = [];
+              if (!fm.name || !/^[a-z][a-z0-9-]{0,63}$/.test(fm.name)) {
+                errors.push('name must be lowercase-kebab, 1-64 chars, starting with a letter; got: ' + JSON.stringify(fm.name));
+              }
+              if (!fm.description || fm.description.length < 40) {
+                errors.push('description must be at least 40 chars so skills.sh can index it usefully; got length ' + (fm.description?.length ?? 0));
+              }
+              if (errors.length) {
+                for (const e of errors) console.error(' - ' + e);
+                process.exit(1);
+              }
+              console.log('OK  name=' + fm.name + '  description.len=' + fm.description.length);
+            " "$skill"
+            echo "::endgroup::"
+          done
+          if [ "$found" = "0" ]; then
+            echo "::warning::no SKILL.md files found under skills/"
+          fi

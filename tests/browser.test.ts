@@ -100,4 +100,43 @@ describe('browser', () => {
       await browser.close();
     }
   });
+  it('shares a single connection across concurrent connects', async () => {
+    const tmpDir = os.tmpdir();
+    const folderPath = path.join(tmpDir, `temp-folder-${crypto.randomUUID()}`);
+    const browser = await launch({
+      headless: true,
+      isolated: false,
+      userDataDir: folderPath,
+      executablePath: executablePath(),
+      devtools: false,
+      chromeArgs: ['--remote-debugging-port=0'],
+    });
+    try {
+      const options = {userDataDir: folderPath, devtools: false};
+      // Force the shared singleton into a disconnected state so the concurrent
+      // calls below all race to (re)connect from scratch.
+      const warmup = await ensureBrowserConnected(options);
+      warmup.disconnect();
+      assert.ok(!warmup.connected);
+
+      // Fire many connects simultaneously. Without coalescing, each call opens
+      // its own CDP connection (a separate Chrome "Allow remote debugging?"
+      // prompt) and returns a distinct Browser; with it, all share one.
+      const connections = await Promise.all(
+        Array.from({length: 5}, () => ensureBrowserConnected(options)),
+      );
+      const [first] = connections;
+      assert.ok(first.connected);
+      for (const connection of connections) {
+        assert.strictEqual(
+          connection,
+          first,
+          'concurrent ensureBrowserConnected calls must share one browser connection',
+        );
+      }
+      first.disconnect();
+    } finally {
+      await browser.close();
+    }
+  });
 });

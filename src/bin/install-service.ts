@@ -6,16 +6,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {execSync} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import {execSync} from 'node:child_process';
-import {fileURLToPath} from 'node:url';
 import process from 'node:process';
+import {fileURLToPath} from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 9333;
 
 function getNodePath(): string {
+  const realExecPath = fs.realpathSync(process.execPath);
+  const candidates =
+    process.platform === 'darwin'
+      ? ['/opt/homebrew/bin/node']
+      : ['/usr/local/bin/node', '/usr/bin/node'];
+  for (const candidate of candidates) {
+    try {
+      if (fs.realpathSync(candidate) === realExecPath) {
+        return candidate;
+      }
+    } catch {
+      // candidate does not exist or is not resolvable; try next
+    }
+  }
   return process.execPath;
 }
 
@@ -32,28 +46,98 @@ function commandExists(cmd: string): boolean {
   }
 }
 
+/**
+ * Write a JSON config file atomically: serialize to a temp file on the same
+ * directory, then rename over the target. rename(2) is atomic, so a reader (or
+ * a crash) never observes a half-written file.
+ */
+function writeJsonAtomic(filePath: string, data: unknown): void {
+  fs.mkdirSync(path.dirname(filePath), {recursive: true});
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2) + '\n');
+  fs.renameSync(tmpPath, filePath);
+}
+
+/**
+ * Configure the `chrome-devtools` MCP server in Claude Code via its CLI.
+ *
+ * `claude mcp add -s user` rewrites the whole ~/.claude.json. If a Claude Code
+ * session is running concurrently it also rewrites that file, and the two can
+ * race into a corrupted config. We can't lock the CLI, but we can back up the
+ * file first and restore it if the result is no longer valid JSON.
+ */
+function configureClaudeCode(url: string): boolean {
+  if (!commandExists('claude')) {
+    console.log(`  ⏭️  Claude Code — not installed`);
+    return false;
+  }
+
+  const claudeConfig = path.join(process.env['HOME'] || '', '.claude.json');
+  let backup: string | undefined;
+  if (fs.existsSync(claudeConfig)) {
+    backup = fs.readFileSync(claudeConfig, 'utf-8');
+    try {
+      JSON.parse(backup);
+    } catch {
+      console.log(
+        `  ⚠️  Claude Code — ~/.claude.json is already invalid JSON; skipping to avoid further damage`,
+      );
+      return false;
+    }
+  }
+
+  try {
+    execSync(`claude mcp remove chrome-devtools -s user 2>/dev/null`, {
+      stdio: 'pipe',
+    });
+  } catch {
+    /* ignore — server may not have been configured */
+  }
+
+  try {
+    execSync(`claude mcp add --transport http -s user chrome-devtools ${url}`, {
+      stdio: 'pipe',
+    });
+  } catch (e) {
+    console.log(`  ⚠️  Claude Code — failed: ${(e as Error).message}`);
+    return false;
+  }
+
+  // Verify the CLI did not corrupt ~/.claude.json.
+  if (backup !== undefined && fs.existsSync(claudeConfig)) {
+    try {
+      JSON.parse(fs.readFileSync(claudeConfig, 'utf-8'));
+    } catch {
+      fs.writeFileSync(claudeConfig, backup);
+      console.log(
+        `  ⚠️  Claude Code — ~/.claude.json was corrupted during the update and has been restored from backup.`,
+      );
+      console.log(
+        `     Quit all running Claude Code sessions, then re-run install:service.`,
+      );
+      return false;
+    }
+  }
+
+  console.log(`  ✅ Claude Code — configured`);
+  return true;
+}
+
 function configureAgents(url: string) {
   console.log(`\n📋 Configuring agents...\n`);
   let configured = 0;
 
   // Claude Code
-  if (commandExists('claude')) {
-    try {
-      execSync(`claude mcp remove chrome-devtools -s user 2>/dev/null`, {stdio: 'pipe'});
-    } catch { /* ignore */ }
-    try {
-      execSync(`claude mcp add --transport http -s user chrome-devtools ${url}`, {stdio: 'pipe'});
-      console.log(`  ✅ Claude Code — configured`);
-      configured++;
-    } catch (e) {
-      console.log(`  ⚠️  Claude Code — failed: ${(e as Error).message}`);
-    }
-  } else {
-    console.log(`  ⏭️  Claude Code — not installed`);
+  if (configureClaudeCode(url)) {
+    configured++;
   }
 
   // Copilot CLI
-  const copilotConfig = path.join(process.env['HOME'] || '', '.copilot', 'mcp-config.json');
+  const copilotConfig = path.join(
+    process.env['HOME'] || '',
+    '.copilot',
+    'mcp-config.json',
+  );
   try {
     let config: Record<string, unknown> = {};
     if (fs.existsSync(copilotConfig)) {
@@ -62,8 +146,7 @@ function configureAgents(url: string) {
     const servers = (config['mcpServers'] || {}) as Record<string, unknown>;
     servers['chrome-devtools'] = {type: 'http', url};
     config['mcpServers'] = servers;
-    fs.mkdirSync(path.dirname(copilotConfig), {recursive: true});
-    fs.writeFileSync(copilotConfig, JSON.stringify(config, null, 2) + '\n');
+    writeJsonAtomic(copilotConfig, config);
     console.log(`  ✅ Copilot CLI — configured (${copilotConfig})`);
     configured++;
   } catch (e) {
@@ -72,7 +155,12 @@ function configureAgents(url: string) {
 
   // OpenCode
   const opencodeBin = commandExists('opencode');
-  const opencodeConfig = path.join(process.env['HOME'] || '', '.config', 'opencode', 'opencode.json');
+  const opencodeConfig = path.join(
+    process.env['HOME'] || '',
+    '.config',
+    'opencode',
+    'opencode.json',
+  );
   if (opencodeBin || fs.existsSync(opencodeConfig)) {
     try {
       let config: Record<string, unknown> = {};
@@ -82,8 +170,7 @@ function configureAgents(url: string) {
       const mcp = (config['mcp'] || {}) as Record<string, unknown>;
       mcp['chrome-devtools'] = {type: 'remote', url, enabled: true};
       config['mcp'] = mcp;
-      fs.mkdirSync(path.dirname(opencodeConfig), {recursive: true});
-      fs.writeFileSync(opencodeConfig, JSON.stringify(config, null, 2) + '\n');
+      writeJsonAtomic(opencodeConfig, config);
       console.log(`  ✅ OpenCode — configured (${opencodeConfig})`);
       configured++;
     } catch (e) {
@@ -306,13 +393,18 @@ function installTailscale(port: number) {
   try {
     execSync('tailscale version', {stdio: 'pipe'});
   } catch {
-    console.error('❌ tailscale CLI not found. Install from https://tailscale.com/download');
+    console.error(
+      '❌ tailscale CLI not found. Install from https://tailscale.com/download',
+    );
     process.exit(1);
   }
 
   // Check tailscale is connected
   try {
-    const status = execSync('tailscale status --json', {encoding: 'utf-8', stdio: 'pipe'});
+    const status = execSync('tailscale status --json', {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+    });
     const parsed = JSON.parse(status);
     if (parsed.BackendState !== 'Running') {
       console.error('❌ Tailscale is not connected. Run: tailscale up');
@@ -333,17 +425,24 @@ function installTailscale(port: number) {
     try {
       execSync(`tailscale serve --bg ${port}`, {stdio: 'inherit'});
     } catch (e) {
-      console.error('❌ Failed to configure tailscale serve:', (e as Error).message);
+      console.error(
+        '❌ Failed to configure tailscale serve:',
+        (e as Error).message,
+      );
       process.exit(1);
     }
   }
 
   // Get the tailscale hostname
   try {
-    const dnsName = execSync('tailscale status --json', {encoding: 'utf-8', stdio: 'pipe'});
+    const dnsName = execSync('tailscale status --json', {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+    });
     const parsed = JSON.parse(dnsName);
     const self = parsed.Self;
-    const hostname = self?.DNSName?.replace(/\.$/, '') || '<your-machine>.tailnet.ts.net';
+    const hostname =
+      self?.DNSName?.replace(/\.$/, '') || '<your-machine>.tailnet.ts.net';
     console.log(`\n✅ Tailscale serve configured`);
     console.log(`   Remote URL: https://${hostname}/mcp`);
     console.log(`   Accessible from any device on your tailnet`);
@@ -355,7 +454,7 @@ function installTailscale(port: number) {
   }
 }
 
-function uninstallTailscale(port: number) {
+function uninstallTailscale() {
   try {
     execSync(`tailscale serve --remove / 2>/dev/null`, {stdio: 'pipe'});
     console.log('✅ Removed tailscale serve');
@@ -364,10 +463,16 @@ function uninstallTailscale(port: number) {
   }
 }
 
-async function healthCheck(port: number, retries = 15, delayMs = 2000): Promise<boolean> {
+async function healthCheck(
+  port: number,
+  retries = 15,
+  delayMs = 2000,
+): Promise<boolean> {
   const url = `http://localhost:${port}/health`;
 
-  process.stdout.write('⏳ Checking service health (verifying Chrome CDP connection)');
+  process.stdout.write(
+    '⏳ Checking service health (verifying Chrome CDP connection)',
+  );
 
   for (let i = 0; i < retries; i++) {
     await new Promise(r => setTimeout(r, delayMs));
@@ -379,14 +484,19 @@ async function healthCheck(port: number, retries = 15, delayMs = 2000): Promise<
       });
 
       if (res.ok) {
-        const data = await res.json() as {status: string; chrome_connected?: boolean};
+        const data = (await res.json()) as {
+          status: string;
+          chrome_connected?: boolean;
+        };
         if (data.status === 'ok' && data.chrome_connected) {
           console.log(' ✅ healthy (Chrome connected)');
           return true;
         }
         if (data.status === 'degraded') {
           console.log(' ⚠️  MCP running but Chrome not connected');
-          console.log('   Make sure Google Chrome is running and check the approval dialog.');
+          console.log(
+            '   Make sure Google Chrome is running and check the approval dialog.',
+          );
           return false;
         }
       }
@@ -397,7 +507,9 @@ async function healthCheck(port: number, retries = 15, delayMs = 2000): Promise<
 
   console.log(' ❌ failed');
   console.log('   Could not verify Chrome DevTools connection.');
-  console.log('   Ensure Chrome is running. The MCP server needs the DevToolsActivePort file.');
+  console.log(
+    '   Ensure Chrome is running. The MCP server needs the DevToolsActivePort file.',
+  );
   return false;
 }
 
@@ -406,17 +518,23 @@ const {port, action, tailscale} = parseArgs();
 const platform = process.platform;
 
 if (platform === 'darwin') {
-  if (action === 'install') installMacOS(port);
-  else if (action === 'uninstall') {
-    uninstallTailscale(port);
+  if (action === 'install') {
+    installMacOS(port);
+  } else if (action === 'uninstall') {
+    uninstallTailscale();
     uninstallMacOS();
-  } else statusMacOS();
+  } else {
+    statusMacOS();
+  }
 } else if (platform === 'linux') {
-  if (action === 'install') installLinux(port);
-  else if (action === 'uninstall') {
-    uninstallTailscale(port);
+  if (action === 'install') {
+    installLinux(port);
+  } else if (action === 'uninstall') {
+    uninstallTailscale();
     uninstallLinux();
-  } else statusLinux();
+  } else {
+    statusLinux();
+  }
 } else {
   console.error(`❌ Unsupported platform: ${platform}`);
   console.error('   Supported: macOS (launchd), Linux (systemd)');
@@ -429,7 +547,12 @@ if (action === 'install') {
     console.error(`\n⚠️  Service installed but health check failed.`);
     console.error(`   Check logs for errors.`);
     if (platform === 'darwin') {
-      const logDir = path.join(process.env['HOME'] || '/tmp', 'Library', 'Logs', 'chrome-devtools-mcp');
+      const logDir = path.join(
+        process.env['HOME'] || '/tmp',
+        'Library',
+        'Logs',
+        'chrome-devtools-mcp',
+      );
       console.error(`   Logs: cat ${logDir}/chrome-devtools-mcp.stderr.log`);
     } else {
       console.error(`   Logs: journalctl --user -u chrome-devtools-mcp`);
