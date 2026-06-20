@@ -16,6 +16,20 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 9333;
 
 function getNodePath(): string {
+  const realExecPath = fs.realpathSync(process.execPath);
+  const candidates =
+    process.platform === 'darwin'
+      ? ['/opt/homebrew/bin/node']
+      : ['/usr/local/bin/node', '/usr/bin/node'];
+  for (const candidate of candidates) {
+    try {
+      if (fs.realpathSync(candidate) === realExecPath) {
+        return candidate;
+      }
+    } catch {
+      // candidate does not exist or is not resolvable; try next
+    }
+  }
   return process.execPath;
 }
 

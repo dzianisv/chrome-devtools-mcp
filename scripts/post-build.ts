@@ -134,6 +134,32 @@ export const ExperimentName = {
 
   copyDevToolsDescriptionFiles();
   copyServiceTemplates();
+  verifyCriticalArtifacts();
+}
+
+/**
+ * Frontend sources are compiled by tsc into `build/node_modules` and imported
+ * at runtime (see `src/third_party/index.ts`). Because tsc's incremental cache
+ * tracks inputs rather than output existence, a stale cache can produce a build
+ * that exits 0 but is missing these files, crashing later with
+ * `ERR_MODULE_NOT_FOUND`. Fail the build loudly here instead of shipping a
+ * broken artifact. `scripts/pre-build.ts` clears the stale cache so the next
+ * build succeeds.
+ */
+function verifyCriticalArtifacts(): void {
+  const criticalOutputs = [
+    'node_modules/chrome-devtools-frontend/mcp/mcp.js',
+    'node_modules/chrome-devtools-frontend/mcp/HostBindings.js',
+  ];
+  const missing = criticalOutputs.filter(rel => {
+    return !fs.existsSync(path.join(BUILD_DIR, rel));
+  });
+  if (missing.length > 0) {
+    throw new Error(
+      `post-build: build is missing required compiled artifacts: ${missing.join(', ')}. ` +
+        'This usually means a stale incremental cache. Run `npm run clean && npm run build`.',
+    );
+  }
 }
 
 function copyServiceTemplates() {

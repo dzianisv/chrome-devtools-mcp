@@ -52,7 +52,16 @@ npx @vibebrowser/chrome-devtools-mcp install --port 9333 --tailscale
 npm run install:service -- --tailscale
 ```
 
+`--tailscale` is a flag on the **installer script**, not the MCP server binary. After the local service is healthy it:
+
+1. Validates `tailscale` CLI is installed and connected (`BackendState === 'Running'`)
+2. Runs `tailscale serve --bg --https=443 http://localhost:<port>` to proxy the MCP server over the tailnet
+3. Reads the machine's tailnet DNS name from `tailscale status --json`
+4. Auto-configures Claude Code, Copilot CLI, and OpenCode with the remote HTTPS URL
+
 Your browser becomes accessible at `https://your-mac.tailnet.ts.net/mcp` — private, encrypted, no public exposure.
+
+Multiple agents can connect simultaneously. Each agent gets its own MCP session (independent `McpServer` + `McpContext`) over the shared browser, with tool calls serialized by a mutex.
 
 ### Manage the service
 
