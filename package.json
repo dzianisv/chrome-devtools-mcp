@@ -1,6 +1,6 @@
 {
   "name": "@vibebrowser/chrome-devtools-mcp",
-  "version": "0.26.6",
+  "version": "0.26.7",
   "description": "Chrome DevTools MCP server with Streamable HTTP transport for multi-agent sharing",
   "type": "module",
   "bin": {
