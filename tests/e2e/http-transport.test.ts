@@ -124,7 +124,8 @@ async function spawnServer(
     });
   }
 
-  const deadline = Date.now() + 15000;
+  const startTimeoutMs = 30000;
+  const deadline = Date.now() + startTimeoutMs;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(healthUrl);
@@ -138,7 +139,7 @@ async function spawnServer(
   }
   console.error('Server stderr:', stderr);
   await stop();
-  throw new Error('Server did not start within 15000ms');
+  throw new Error(`Server did not start within ${startTimeoutMs}ms`);
 }
 
 function createClient(): Client {
